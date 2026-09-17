@@ -1290,8 +1290,10 @@ describe("sessions_send gating", () => {
     );
   });
 
-  it("rejects direct thread session targets before dispatching an agent run", async () => {
+  it("dispatches a Slack thread session target without external reply delivery", async () => {
     setActivePluginRegistry(createSessionConversationTestRegistry());
+    const { runSessionsSendA2AFlow } = await import("./sessions-send-tool.a2a.js");
+    vi.mocked(runSessionsSendA2AFlow).mockClear();
     loadConfigMock.mockReturnValue({
       session: { scope: "per-sender", mainKey: "main" },
       tools: {
@@ -1300,6 +1302,7 @@ describe("sessions_send gating", () => {
       },
     });
     const threadSessionKey = "agent:main:slack:channel:C123:thread:1710000000.000100";
+    expect(parseSessionThreadInfo(threadSessionKey).threadId).toBe("1710000000.000100");
     const tool = createMainSessionsSendTool();
 
     const result = await tool.execute("call-thread-target", {
@@ -1308,17 +1311,32 @@ describe("sessions_send gating", () => {
       timeoutSeconds: 0,
     });
 
-    const details = requireDetails(result);
-    expect(details.status).toBe("error");
-    expect(details.sessionKey).toBe(threadSessionKey);
-    expect((result.details as { error?: string } | undefined)?.error ?? "").toContain(
-      "cannot target a thread session",
+    expect(requireDetails(result)).toMatchObject({
+      status: "accepted",
+      sessionKey: threadSessionKey,
+      delivery: { status: "pending", mode: "announce" },
+    });
+    // The thread route stays human-facing, so the target turn must run on the
+    // internal channel with delivery off and message-tool-only source replies.
+    // Only an explicit `message` call can reach the Slack thread.
+    expect(callGatewayMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: "agent",
+        params: expect.objectContaining({
+          sessionKey: threadSessionKey,
+          deliver: false,
+          sourceReplyDeliveryMode: "message_tool_only",
+          channel: "webchat",
+        }),
+      }),
     );
-    expect(callGatewayMock).toHaveBeenCalledTimes(1);
-    expect(requireGatewayRequest().method).toBe("sessions.resolve");
+    // The A2A announce flow keeps its existing contract for the exact thread key.
+    expect(runSessionsSendA2AFlow).toHaveBeenCalledWith(
+      expect.objectContaining({ targetSessionKey: threadSessionKey }),
+    );
   });
 
-  it("rejects Telegram topic session targets before dispatching an agent run", async () => {
+  it("dispatches a Telegram topic session target without external reply delivery", async () => {
     loadConfigMock.mockReturnValue({
       session: { scope: "per-sender", mainKey: "main" },
       tools: {
@@ -1348,17 +1366,24 @@ describe("sessions_send gating", () => {
       timeoutSeconds: 0,
     });
 
-    const details = requireDetails(result);
-    expect(details.status).toBe("error");
-    expect(details.sessionKey).toBe(topicSessionKey);
-    expect((result.details as { error?: string } | undefined)?.error ?? "").toContain(
-      "cannot target a thread session",
+    expect(requireDetails(result)).toMatchObject({
+      status: "accepted",
+      sessionKey: topicSessionKey,
+    });
+    expect(callGatewayMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: "agent",
+        params: expect.objectContaining({
+          sessionKey: topicSessionKey,
+          deliver: false,
+          sourceReplyDeliveryMode: "message_tool_only",
+          channel: "webchat",
+        }),
+      }),
     );
-    expect(callGatewayMock).toHaveBeenCalledTimes(1);
-    expect(requireGatewayRequest().method).toBe("sessions.resolve");
   });
 
-  it("rejects label targets that resolve to canonical thread sessions", async () => {
+  it("dispatches label targets that resolve to canonical thread sessions", async () => {
     setActivePluginRegistry(createSessionConversationTestRegistry());
     loadConfigMock.mockReturnValue({
       session: { scope: "per-sender", mainKey: "main" },
@@ -1377,15 +1402,50 @@ describe("sessions_send gating", () => {
       timeoutSeconds: 0,
     });
 
-    const details = requireDetails(result);
-    expect(details.status).toBe("error");
-    expect(details.sessionKey).toBe(threadSessionKey);
-    expect((result.details as { error?: string } | undefined)?.error ?? "").toContain(
-      "cannot target a thread session",
+    expect(requireDetails(result)).toMatchObject({
+      status: "accepted",
+      sessionKey: threadSessionKey,
+    });
+    expect(callGatewayMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: "agent",
+        params: expect.objectContaining({
+          sessionKey: threadSessionKey,
+          deliver: false,
+          sourceReplyDeliveryMode: "message_tool_only",
+          channel: "webchat",
+        }),
+      }),
     );
-    expect(callGatewayMock).toHaveBeenCalledTimes(2);
-    expect(requireGatewayRequest().method).toBe("sessions.resolve");
-    expect(requireGatewayRequest(1).method).toBe("sessions.resolve");
+  });
+
+  it("still denies a cross-agent thread session target when A2A is disabled", async () => {
+    setActivePluginRegistry(createSessionConversationTestRegistry());
+    const threadSessionKey = "agent:other:discord:channel:123456:thread:987654";
+    const tool = createSessionsSendTool({
+      agentSessionKey: MAIN_AGENT_SESSION_KEY,
+      agentChannel: MAIN_AGENT_CHANNEL,
+      config: {
+        session: { scope: "per-sender", mainKey: "main" },
+        tools: {
+          agentToAgent: { enabled: false },
+          sessions: { visibility: "all" },
+        },
+      } as never,
+    });
+
+    const result = await tool.execute("call-thread-cross-agent", {
+      sessionKey: threadSessionKey,
+      message: "hi",
+      timeoutSeconds: 0,
+    });
+
+    // Lifting the thread prohibition must not lift the access checks that run
+    // after it; a thread key is authorized exactly like any other session key.
+    expect(requireDetails(result).status).toBe("forbidden");
+    expect(callGatewayMock.mock.calls).not.toContainEqual([
+      expect.objectContaining({ method: "agent" }),
+    ]);
   });
 
   it("does not disclose a resolved thread session key from a sessionId target", async () => {
@@ -1408,13 +1468,9 @@ describe("sessions_send gating", () => {
     });
 
     const details = requireDetails(result);
-    expect(details.status).toBe("error");
+    expect(details.status).toBe("forbidden");
     expect(details.sessionKey).toBe("thread-session-id");
-    expect((result.details as { error?: string } | undefined)?.error ?? "").toContain(
-      "cannot target a thread session",
-    );
-    expect(callGatewayMock).toHaveBeenCalledTimes(1);
-    expect(requireGatewayRequest().method).toBe("sessions.resolve");
+    expect(JSON.stringify(details)).not.toContain(threadSessionKey);
   });
 
   it("rejects a synchronous target that resolves to the calling session", async () => {

@@ -776,15 +776,6 @@ export function createSessionsSendTool(opts?: {
           sessionKey: unresolvedDisplayKey,
         });
       }
-      if (parseSessionThreadInfo(resolvedKey).threadId) {
-        return jsonResult({
-          runId: crypto.randomUUID(),
-          status: "error",
-          error:
-            "sessions_send cannot target a thread session for inter-agent coordination. Use the parent channel session key instead.",
-          sessionKey: unresolvedDisplayKey,
-        });
-      }
       const authorizationTargetKey = mayUseRequesterForLiteralSentinel
         ? effectiveRequesterKey
         : targetAgentId && !parseAgentSessionKey(resolvedKey)
@@ -945,6 +936,13 @@ export function createSessionsSendTool(opts?: {
             agentId: targetAgentId,
             sessionKey: resolvedKey,
             idempotencyKey,
+            // Channel-scoped targets (including thread-scoped keys) keep a
+            // human-facing route in their session key. These three facts are
+            // what keep a tool-routed turn out of that conversation: `deliver`
+            // gates gateway delivery, `message_tool_only` makes source-reply
+            // suppression the run's policy, and the internal channel keeps the
+            // turn's origin off the external surface. Only an explicit `message`
+            // tool call can reach the human conversation from here.
             deliver: false,
             sourceReplyDeliveryMode: "message_tool_only" as const,
             channel: INTERNAL_MESSAGE_CHANNEL,
