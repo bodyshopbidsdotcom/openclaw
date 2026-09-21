@@ -277,8 +277,9 @@ describe("createOpenClawCodingTools availability guidance", () => {
     expect(tool?.description).toBe(
       [
         "Run a visible session on this Gateway by sessionKey/label, or a configured local agent by agentId; sessionKey wins redundant label.",
-        "A session identifies model context, not an external address; its reply may still announce through established delivery context.",
+        "A session identifies model context, not an external address; the target may still surface its own answer in its established delivery context.",
         'Accepted results report target admission as `targetDisposition: "queued"` or `"steered"`; `delivery.status` is only later announcement state, and neither proves target completion.',
+        "The target answers in its own session and never announces back into yours: a waited send returns its reply inline as the tool result, and timeoutSeconds:0 returns as soon as the run is admitted. Nothing wakes you later, so ask the target to sessions_send you a result when you need one.",
         "Omit mode to automatically continue your paused native child task; returns runId/taskRunId with task-owned completion instead of an inline wait or watch. Other sessions use ordinary message delivery. mode:notify queues ephemeral context for the next turn without waking or starting work (bounded process memory, not a durable inbox). mode:steer injects guidance into an active supported run and never starts idle work. mode:followup starts a separate turn without steering or resuming a paused task. mode:resume requires a paused native child task and rejects watch:true and positive timeoutSeconds.",
         "For an exact external destination, use `conversations_list` plus `conversations_send`/`conversations_turn`.",
         'Thread chats rejected: target parent channel. Missing configured-agent main created. Waits for reply when available; status "no_reply" is terminal, so do not wait for an announcement.',

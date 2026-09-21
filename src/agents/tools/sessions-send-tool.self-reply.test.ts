@@ -1,12 +1,12 @@
-// sessions_send A2A tests cover announce delivery, same-session replies, delayed
-// run-owned replies, and channel target/account routing.
+// sessions_send self-reply tests cover channel target/account routing, delayed
+// run-owned replies, suppressed duplicates, and requester failure reports.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CallGatewayOptions } from "../../gateway/call.js";
 import { setActivePluginRegistry } from "../../plugins/runtime.js";
 import { createSessionConversationTestRegistry } from "../../test-utils/session-conversation-registry.js";
 import { runAgentStep } from "./agent-step.js";
 import type { GatewaySessionListRow } from "./sessions-helpers.js";
-import { runSessionsSendA2AFlow } from "./sessions-send-tool.a2a.js";
+import { runSessionsSendSelfReply } from "./sessions-send-tool.self-reply.js";
 
 const callGatewayMock = vi.hoisted(() => vi.fn());
 const agentWaitMock = vi.hoisted(() => vi.fn());
@@ -48,7 +48,7 @@ function firstMockArg(
   return call[0] as Record<string, unknown>;
 }
 
-describe("runSessionsSendA2AFlow announce delivery", () => {
+describe("runSessionsSendSelfReply channel delivery", () => {
   let gatewayCalls: CallGatewayOptions[];
   let sessionListRows: GatewaySessionListRow[];
 
@@ -91,13 +91,11 @@ describe("runSessionsSendA2AFlow announce delivery", () => {
   });
 
   it("passes threadId through to gateway send for Telegram forum topics", async () => {
-    await runSessionsSendA2AFlow({
+    await runSessionsSendSelfReply({
       targetAgentId: "main",
       targetSessionKey: "agent:main:telegram:group:-100123:topic:554",
       displayKey: "agent:main:telegram:group:-100123:topic:554",
-      message: "Test message",
       announceTimeoutMs: 10_000,
-      maxPingPongTurns: 0,
       roundOneReply: "Worker completed successfully",
     });
 
@@ -109,13 +107,11 @@ describe("runSessionsSendA2AFlow announce delivery", () => {
   });
 
   it("omits threadId for non-topic sessions", async () => {
-    await runSessionsSendA2AFlow({
+    await runSessionsSendSelfReply({
       targetAgentId: "main",
       targetSessionKey: "agent:main:discord:group:dev",
       displayKey: "agent:main:discord:group:dev",
-      message: "Test message",
       announceTimeoutMs: 10_000,
-      maxPingPongTurns: 0,
       roundOneReply: "Worker completed successfully",
     });
 
@@ -125,14 +121,12 @@ describe("runSessionsSendA2AFlow announce delivery", () => {
     expect(sendParams.threadId).toBeUndefined();
   });
 
-  it("bypasses the announce decider for same-session channel replies", async () => {
-    await runSessionsSendA2AFlow({
+  it("delivers a same-session reply to its own channel", async () => {
+    await runSessionsSendSelfReply({
       targetAgentId: "main",
       targetSessionKey: "agent:main:discord:channel:target-room",
       displayKey: "agent:main:discord:channel:target-room",
-      message: "Test message",
       announceTimeoutMs: 10_000,
-      maxPingPongTurns: 2,
       requesterSessionKey: "agent:main:discord:channel:target-room",
       requesterChannel: "discord",
       roundOneReply: "Substantive channel reply",
@@ -176,20 +170,18 @@ describe("runSessionsSendA2AFlow announce delivery", () => {
         asVoice: true,
       },
     },
-  ])("projects $name into the gateway announcement contract", async ({ reply, expected }) => {
-    vi.mocked(runAgentStep).mockResolvedValueOnce(reply);
-
-    await runSessionsSendA2AFlow({
+  ])("projects $name into the gateway delivery contract", async ({ reply, expected }) => {
+    await runSessionsSendSelfReply({
       targetAgentId: "orion",
       targetSessionKey: "agent:orion:discord:channel:target-room",
       displayKey: "agent:orion:discord:channel:target-room",
-      message: "Complete the requested work.",
       announceTimeoutMs: 10_000,
-      maxPingPongTurns: 0,
-      requesterSessionKey: "agent:main:discord:channel:requester-room",
+      requesterSessionKey: "agent:orion:discord:channel:target-room",
       requesterChannel: "discord",
-      roundOneReply: "The target agent completed.",
+      roundOneReply: reply,
     });
+
+    expect(runAgentStep).not.toHaveBeenCalled();
 
     const sendParams = requireGatewayCall("send").params as Record<string, unknown>;
     expect(sendParams).toMatchObject(expected);
@@ -213,13 +205,11 @@ describe("runSessionsSendA2AFlow announce delivery", () => {
       terminalReply: { disposition: "visible", text: "Delayed channel reply" },
     });
 
-    await runSessionsSendA2AFlow({
+    await runSessionsSendSelfReply({
       targetAgentId: "main",
       targetSessionKey: "agent:main:discord:channel:target-room",
       displayKey: "agent:main:discord:channel:target-room",
-      message: "Test message",
       announceTimeoutMs: 10_000,
-      maxPingPongTurns: 2,
       requesterSessionKey: "agent:main:discord:channel:target-room",
       requesterChannel: "discord",
       waitRunId: "run-delayed-channel",
@@ -238,19 +228,17 @@ describe("runSessionsSendA2AFlow announce delivery", () => {
     expect(sendParams).not.toHaveProperty("sessionKey");
   });
 
-  it("does not announce when the completed run has no reply", async () => {
+  it("does not deliver when the completed run has no reply", async () => {
     agentWaitMock.mockResolvedValueOnce({
       status: "ok",
       terminalReply: { disposition: "silent" },
     });
 
-    await runSessionsSendA2AFlow({
+    await runSessionsSendSelfReply({
       targetAgentId: "main",
       targetSessionKey: "agent:main:discord:channel:target-room",
       displayKey: "agent:main:discord:channel:target-room",
-      message: "Test message",
       announceTimeoutMs: 10_000,
-      maxPingPongTurns: 2,
       requesterSessionKey: "agent:main:discord:channel:target-room",
       requesterChannel: "discord",
       waitRunId: "run-silent",
@@ -263,13 +251,11 @@ describe("runSessionsSendA2AFlow announce delivery", () => {
   it("delivers a legitimate reply that quotes incomplete-turn text", async () => {
     const reply = 'The log says "Agent couldn\'t generate a response", but the retry succeeded.';
 
-    await runSessionsSendA2AFlow({
+    await runSessionsSendSelfReply({
       targetAgentId: "main",
       targetSessionKey: "agent:main:discord:channel:target-room",
       displayKey: "agent:main:discord:channel:target-room",
-      message: "Diagnose the failed turn",
       announceTimeoutMs: 10_000,
-      maxPingPongTurns: 2,
       requesterSessionKey: "agent:main:discord:channel:target-room",
       requesterChannel: "discord",
       roundOneReply: reply,
@@ -280,29 +266,23 @@ describe("runSessionsSendA2AFlow announce delivery", () => {
     expect((sendCall.params as Record<string, unknown>).message).toBe(reply);
   });
 
-  it("keeps the announce decider for same-session sends from a different channel", async () => {
-    vi.mocked(runAgentStep).mockResolvedValueOnce("ANNOUNCE_SKIP");
-
-    await runSessionsSendA2AFlow({
+  it("does not deliver a same-session reply to a different channel", async () => {
+    await runSessionsSendSelfReply({
       targetAgentId: "main",
       targetSessionKey: "agent:main:discord:channel:target-room",
       displayKey: "agent:main:discord:channel:target-room",
-      message: "Test message",
       announceTimeoutMs: 10_000,
-      maxPingPongTurns: 2,
       requesterSessionKey: "agent:main:discord:channel:target-room",
       requesterChannel: "webchat",
       roundOneReply: "Substantive channel reply",
     });
 
-    expect(runAgentStep).toHaveBeenCalledTimes(1);
-    const stepInput = firstMockArg(vi.mocked(runAgentStep), "agent step");
-    expect(stepInput.message).toBe("Agent-to-agent announce step.");
+    expect(runAgentStep).not.toHaveBeenCalled();
     expect(gatewayCalls.find((call) => call.method === "send")).toBeUndefined();
   });
 
   it.each(["inline", "delayed"] as const)(
-    "does not re-announce a delivered %s source reply for a webchat requester",
+    "does not redeliver an already delivered %s source reply",
     async (mode) => {
       agentWaitMock.mockResolvedValueOnce({
         status: "ok",
@@ -310,13 +290,11 @@ describe("runSessionsSendA2AFlow announce delivery", () => {
         terminalReceipt: deliveredReceipt("run-delivered-source"),
       });
 
-      await runSessionsSendA2AFlow({
+      await runSessionsSendSelfReply({
         targetAgentId: "main",
         targetSessionKey: "agent:main:discord:channel:target-room",
         displayKey: "agent:main:discord:channel:target-room",
-        message: "Test message",
         announceTimeoutMs: 10_000,
-        maxPingPongTurns: 2,
         requesterSessionKey: "agent:main:discord:channel:target-room",
         requesterChannel: "webchat",
         ...(mode === "inline"
@@ -329,105 +307,12 @@ describe("runSessionsSendA2AFlow announce delivery", () => {
     },
   );
 
-  it.each(["inline", "delayed"] as const)(
-    "delivers an internal %s reply once without bouncing it back to the target",
-    async (mode) => {
-      agentWaitMock.mockResolvedValueOnce({
-        status: "ok",
-        terminalReply: { disposition: "visible", text: "Already delivered source reply" },
-      });
-
-      await runSessionsSendA2AFlow({
-        targetAgentId: "main",
-        targetSessionKey: "agent:main:webchat:direct:target",
-        displayKey: "agent:main:webchat:direct:target",
-        message: "Test message",
-        announceTimeoutMs: 10_000,
-        maxPingPongTurns: 5,
-        requesterSessionKey: "agent:main:webchat:direct:requester",
-        requesterChannel: "webchat",
-        ...(mode === "inline"
-          ? { roundOneReply: "Already delivered source reply" }
-          : { waitRunId: "run-delivered-cross-session-source" }),
-      });
-
-      expect(runAgentStep).toHaveBeenCalledOnce();
-      expect(firstMockArg(vi.mocked(runAgentStep), "agent step")).toMatchObject({
-        sessionKey: "agent:main:webchat:direct:requester",
-        message: "Already delivered source reply",
-        sourceSessionKey: "agent:main:webchat:direct:target",
-        sourceTool: "sessions_send",
-      });
-      expect(gatewayCalls.find((call) => call.method === "send")).toBeUndefined();
-    },
-  );
-
-  it("preserves requester delivery when the target delivered only to its own channel", async () => {
-    await runSessionsSendA2AFlow({
-      targetAgentId: "main",
-      targetSessionKey: "agent:main:discord:channel:target-room",
-      displayKey: "agent:main:discord:channel:target-room",
-      message: "Test message",
-      announceTimeoutMs: 10_000,
-      maxPingPongTurns: 5,
-      requesterSessionKey: "agent:main:webchat:direct:requester",
-      requesterChannel: "webchat",
-      roundOneReply: "Reply already posted to the target channel",
-      sourceReplyDelivered: true,
-    });
-
-    expect(runAgentStep).toHaveBeenCalledOnce();
-    expect(firstMockArg(vi.mocked(runAgentStep), "agent step")).toMatchObject({
-      sessionKey: "agent:main:webchat:direct:requester",
-      message: "Reply already posted to the target channel",
-      sourceSessionKey: "agent:main:discord:channel:target-room",
-      sourceTool: "sessions_send",
-    });
-    expect(gatewayCalls.find((call) => call.method === "send")).toBeUndefined();
-  });
-
-  it("preserves an undelivered target-channel announcement for an internal requester", async () => {
-    vi.mocked(runAgentStep)
-      .mockResolvedValueOnce("Requester acknowledged the result")
-      .mockResolvedValueOnce("Target channel announcement");
-
-    await runSessionsSendA2AFlow({
-      targetAgentId: "main",
-      targetSessionKey: "agent:main:discord:channel:target-room",
-      displayKey: "agent:main:discord:channel:target-room",
-      message: "Test message",
-      announceTimeoutMs: 10_000,
-      maxPingPongTurns: 5,
-      requesterSessionKey: "agent:main:webchat:direct:requester",
-      requesterChannel: "webchat",
-      roundOneReply: "Result for both conversations",
-    });
-
-    expect(runAgentStep).toHaveBeenCalledTimes(2);
-    expect(vi.mocked(runAgentStep).mock.calls[0]?.[0]).toMatchObject({
-      sessionKey: "agent:main:webchat:direct:requester",
-      message: "Result for both conversations",
-      sourceSessionKey: "agent:main:discord:channel:target-room",
-    });
-    expect(vi.mocked(runAgentStep).mock.calls[1]?.[0]).toMatchObject({
-      sessionKey: "agent:main:discord:channel:target-room",
-      message: "Agent-to-agent announce step.",
-    });
-    expect(requireGatewayCall("send").params).toMatchObject({
-      channel: "discord",
-      to: "channel:target-room",
-      message: "Target channel announcement",
-    });
-  });
-
-  it("does not run the announce decider for same-session sends without an announce target", async () => {
-    await runSessionsSendA2AFlow({
+  it("does not deliver a same-session reply without a resolved channel target", async () => {
+    await runSessionsSendSelfReply({
       targetAgentId: "main",
       targetSessionKey: "agent:main:main",
       displayKey: "agent:main:main",
-      message: "Test message",
       announceTimeoutMs: 10_000,
-      maxPingPongTurns: 2,
       requesterSessionKey: "agent:main:main",
       requesterChannel: "qa-channel",
       roundOneReply: "Already delivered through the source message tool",
@@ -437,7 +322,7 @@ describe("runSessionsSendA2AFlow announce delivery", () => {
     expect(gatewayCalls.find((call) => call.method === "send")).toBeUndefined();
   });
 
-  it("uses the projected delivery context for the Discord announce account", async () => {
+  it("uses the projected delivery context for the Discord delivery account", async () => {
     const accountId = "thinker";
     const session = {
       key: "agent:main:discord:channel:target-room",
@@ -453,13 +338,11 @@ describe("runSessionsSendA2AFlow announce delivery", () => {
     } satisfies GatewaySessionListRow;
     sessionListRows = [session];
 
-    await runSessionsSendA2AFlow({
+    await runSessionsSendSelfReply({
       targetAgentId: "main",
       targetSessionKey: session.key,
       displayKey: session.key,
-      message: "Test message",
       announceTimeoutMs: 10_000,
-      maxPingPongTurns: 0,
       roundOneReply: "Worker completed successfully",
     });
 
@@ -472,15 +355,13 @@ describe("runSessionsSendA2AFlow announce delivery", () => {
   });
 
   it.each(["NO_REPLY", "HEARTBEAT_OK", "ANNOUNCE_SKIP", "REPLY_SKIP"])(
-    "does not re-inject exact control reply %s into agent-to-agent flow",
+    "does not deliver exact control reply %s",
     async (roundOneReply) => {
-      await runSessionsSendA2AFlow({
+      await runSessionsSendSelfReply({
         targetAgentId: "main",
         targetSessionKey: "agent:main:discord:group:dev",
         displayKey: "agent:main:discord:group:dev",
-        message: "Test message",
         announceTimeoutMs: 10_000,
-        maxPingPongTurns: 2,
         requesterSessionKey: "agent:main:discord:group:req",
         requesterChannel: "discord",
         roundOneReply,
@@ -504,13 +385,11 @@ describe("runSessionsSendA2AFlow announce delivery", () => {
   ] as const)("notifies the requester when accepted delivery ends with $status", async (wait) => {
     agentWaitMock.mockResolvedValueOnce(wait);
 
-    await runSessionsSendA2AFlow({
+    await runSessionsSendSelfReply({
       targetAgentId: "worker",
       targetSessionKey: "agent:worker:discord:group:dev",
       displayKey: "agent:worker:discord:group:dev",
-      message: "Test message",
       announceTimeoutMs: 10_000,
-      maxPingPongTurns: 2,
       requesterSessionKey: "agent:main:discord:group:req",
       requesterChannel: "discord",
       notifyRequesterOnWaitFailure: true,
@@ -540,13 +419,11 @@ describe("runSessionsSendA2AFlow announce delivery", () => {
         terminalReceipt: deliveredReceipt("run-failed-after-source-reply"),
       });
 
-      await runSessionsSendA2AFlow({
+      await runSessionsSendSelfReply({
         targetAgentId: "main",
         targetSessionKey: "agent:main:discord:channel:target-room",
         displayKey: "agent:main:discord:channel:target-room",
-        message: "Test message",
         announceTimeoutMs: 10_000,
-        maxPingPongTurns: 2,
         requesterSessionKey: "agent:main:discord:channel:target-room",
         requesterChannel: "webchat",
         notifyRequesterOnWaitFailure: true,
@@ -570,13 +447,11 @@ describe("runSessionsSendA2AFlow announce delivery", () => {
       endedAt: 1,
     });
 
-    await runSessionsSendA2AFlow({
+    await runSessionsSendSelfReply({
       targetAgentId: "worker",
       targetSessionKey: "agent:worker:discord:group:dev",
       displayKey: "agent:worker:discord:group:dev",
-      message: "Test message",
       announceTimeoutMs: 10_000,
-      maxPingPongTurns: 2,
       requesterSessionKey: "agent:main:discord:group:req",
       requesterChannel: "discord",
       waitRunId: "run-lock-timeout-inline",
@@ -592,13 +467,11 @@ describe("runSessionsSendA2AFlow announce delivery", () => {
       timeoutPhase: "gateway_draining",
     });
 
-    await runSessionsSendA2AFlow({
+    await runSessionsSendSelfReply({
       targetAgentId: "worker",
       targetSessionKey: "agent:worker:discord:group:dev",
       displayKey: "agent:worker:discord:group:dev",
-      message: "Test message",
       announceTimeoutMs: 10_000,
-      maxPingPongTurns: 2,
       requesterSessionKey: "agent:main:discord:group:req",
       requesterChannel: "discord",
       notifyRequesterOnWaitFailure: true,
@@ -612,13 +485,11 @@ describe("runSessionsSendA2AFlow announce delivery", () => {
   it("keeps recoverable delayed wait errors silent", async () => {
     agentWaitMock.mockRejectedValueOnce(new Error("gateway closed (1006)"));
 
-    await runSessionsSendA2AFlow({
+    await runSessionsSendSelfReply({
       targetAgentId: "worker",
       targetSessionKey: "agent:worker:discord:group:dev",
       displayKey: "agent:worker:discord:group:dev",
-      message: "Test message",
       announceTimeoutMs: 10_000,
-      maxPingPongTurns: 2,
       requesterSessionKey: "agent:main:discord:group:req",
       requesterChannel: "discord",
       notifyRequesterOnWaitFailure: true,
@@ -628,48 +499,4 @@ describe("runSessionsSendA2AFlow announce delivery", () => {
     expect(runAgentStep).not.toHaveBeenCalled();
     expect(gatewayCalls.find((call) => call.method === "send")).toBeUndefined();
   });
-
-  it("skips requester steps when ping-pong is disabled but still announces from the target", async () => {
-    const targetSessionKey = "agent:other:discord:group:ops";
-
-    await runSessionsSendA2AFlow({
-      targetAgentId: "other",
-      targetSessionKey,
-      displayKey: targetSessionKey,
-      message: "Test message",
-      announceTimeoutMs: 10_000,
-      maxPingPongTurns: 0,
-      requesterSessionKey: "agent:main:cron:job:run:abc",
-      requesterChannel: "telegram",
-      roundOneReply: "Worker completed successfully",
-    });
-
-    expect(runAgentStep).toHaveBeenCalledOnce();
-    expect(firstMockArg(vi.mocked(runAgentStep), "agent step")).toMatchObject({
-      sessionKey: targetSessionKey,
-      message: "Agent-to-agent announce step.",
-    });
-  });
-
-  it.each(["NO_REPLY", "HEARTBEAT_OK", "ANNOUNCE_SKIP"])(
-    "suppresses exact announce control reply %s before channel delivery",
-    async (announceReply) => {
-      vi.mocked(runAgentStep).mockResolvedValueOnce(announceReply);
-
-      await runSessionsSendA2AFlow({
-        targetAgentId: "main",
-        targetSessionKey: "agent:main:discord:group:dev",
-        displayKey: "agent:main:discord:group:dev",
-        message: "Test message",
-        announceTimeoutMs: 10_000,
-        maxPingPongTurns: 0,
-        roundOneReply: "Worker completed successfully",
-      });
-
-      const stepInput = firstMockArg(vi.mocked(runAgentStep), "agent step");
-      expect(stepInput.message).toBe("Agent-to-agent announce step.");
-      expect(stepInput.transcriptMessage).toBe("");
-      expect(gatewayCalls.find((call) => call.method === "send")).toBeUndefined();
-    },
-  );
 });

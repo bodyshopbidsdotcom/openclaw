@@ -26,11 +26,11 @@ import {
 import { createSessionConversationTestRegistry } from "../../test-utils/session-conversation-registry.js";
 import "../test-helpers/fast-openclaw-tools-sessions.js";
 import type { AgentToolGatewayRequestCaller } from "./in-process-gateway.js";
-import { runSessionsSendA2AFlow } from "./sessions-send-tool.a2a.js";
 import { createSessionsSendTool } from "./sessions-send-tool.js";
+import { runSessionsSendSelfReply } from "./sessions-send-tool.self-reply.js";
 
-vi.mock("./sessions-send-tool.a2a.js", () => ({
-  runSessionsSendA2AFlow: vi.fn(async () => {}),
+vi.mock("./sessions-send-tool.self-reply.js", () => ({
+  runSessionsSendSelfReply: vi.fn(async () => {}),
 }));
 
 const requesterSessionKey = "agent:main:main";
@@ -51,7 +51,7 @@ describe("sessions_send dispatch admission", () => {
     setRuntimeConfigSnapshot(config);
     setActivePluginRegistry(createSessionConversationTestRegistry());
     resetGatewayWorkAdmission();
-    vi.mocked(runSessionsSendA2AFlow).mockClear();
+    vi.mocked(runSessionsSendSelfReply).mockClear();
     registerWatch = vi.spyOn(sessionStateEvents, "registerSessionStateWatch");
     for (const [sessionKey, sessionId] of [
       [requesterSessionKey, "requester-session"],
@@ -71,7 +71,8 @@ describe("sessions_send dispatch admission", () => {
     await state.cleanup();
   });
 
-  it("keeps the accepted reply source until the detached flow actually settles", async () => {
+  // Only a fire-and-forget self-send still starts detached reply work.
+  it("keeps the accepted reply source until the detached self-reply actually settles", async () => {
     const context = createContext();
     const owner = createOperatorClient({ profileId: "send-owner", scopes: ["operator.write"] });
     const source = captureGatewayDeviceRevocation(
@@ -80,15 +81,15 @@ describe("sessions_send dispatch admission", () => {
       () => true,
     );
     const finish = createDeferredCore();
-    vi.mocked(runSessionsSendA2AFlow).mockImplementationOnce(() => finish.promise);
+    vi.mocked(runSessionsSendSelfReply).mockImplementationOnce(() => finish.promise);
     const callGateway = vi.fn();
     callGateway.mockImplementation(
       async (request: Parameters<AgentToolGatewayRequestCaller>[0]) => {
         if (request.method === "sessions.resolve") {
-          return { key: targetSessionKey, agentId: "main" };
+          return { key: requesterSessionKey, agentId: "main" };
         }
         if (request.method === "sessions.list") {
-          return { sessions: [{ key: targetSessionKey, agentId: "main", kind: "direct" }] };
+          return { sessions: [{ key: requesterSessionKey, agentId: "main", kind: "direct" }] };
         }
         if (request.method === "agent") {
           return { runId, status: "accepted" };
@@ -116,16 +117,15 @@ describe("sessions_send dispatch admission", () => {
                 config,
                 callGateway,
                 idempotencyKey: runId,
-              }).execute("send-followup", {
-                sessionKey: targetSessionKey,
+              }).execute("send-self", {
+                sessionKey: requesterSessionKey,
                 message: "Continue the task",
-                mode: "followup",
                 timeoutSeconds: 0,
               }),
           ),
       );
       expect(result.details).toMatchObject({ status: "accepted", delivery: { status: "pending" } });
-      expect(runSessionsSendA2AFlow).toHaveBeenCalledOnce();
+      expect(runSessionsSendSelfReply).toHaveBeenCalledOnce();
       source.release();
       expect(readGatewayDeviceSourceAuthority(source.isCurrent)?.()).toBe(true);
     } finally {
@@ -140,7 +140,7 @@ describe("sessions_send dispatch admission", () => {
     { admission: "pending", timeoutSeconds: 0 },
     { admission: "pending", timeoutSeconds: 1 },
   ] as const)(
-    "does not install a watch or start A2A when admission is $admission (wait $timeoutSeconds)",
+    "does not install a watch or start a self-reply when admission is $admission (wait $timeoutSeconds)",
     async ({ admission, timeoutSeconds }) => {
       const requests: Parameters<AgentToolGatewayRequestCaller>[0][] = [];
       const callGateway = vi.fn();
@@ -198,7 +198,7 @@ describe("sessions_send dispatch admission", () => {
         expect.soft(result.details).not.toHaveProperty("sentBeforeError");
       }
       expect.soft(registerWatch).not.toHaveBeenCalled();
-      expect.soft(runSessionsSendA2AFlow).not.toHaveBeenCalled();
+      expect.soft(runSessionsSendSelfReply).not.toHaveBeenCalled();
       expect.soft(requests.filter((request) => request.method === "agent")).toHaveLength(1);
       expect.soft(requests.some((request) => request.method === "agent.wait")).toBe(false);
     },

@@ -160,7 +160,7 @@ In Code Mode, the conversation tools reuse their exact Gateway output contracts.
 
 ## Sending cross-session messages
 
-`sessions_send` runs another session on the same Gateway and optionally waits for the response. Its `sessionKey`, `label`, or `agentId` selects local model context, not an external destination. The resulting reply can still be announced through the established requester or target delivery context; that existing behavior is unchanged. For exact external delivery, use a conversation tool or `message` with an explicit channel and target.
+`sessions_send` runs another session on the same Gateway and optionally waits for the response. Its `sessionKey`, `label`, or `agentId` selects local model context, not an external destination. A waited send returns the target's reply as the tool result; OpenClaw does not announce that reply into the requester session or the target's channel afterward. The target can still surface its own answer through its established delivery context. For exact external delivery, use a conversation tool or `message` with an explicit channel and target.
 
 Sessions keep their addresses when execution moves between the Gateway, a paired device, and a cloud worker. An OpenClaw worker can send to an authorized parent, child, or sibling using its exact session key, including a target running on the Gateway. The Gateway validates the current session identities and normal visibility policy before admitting the target turn; target placement does not grant messaging access. Targets outside the configured visibility scope, archived targets, and replaced targets remain denied.
 
@@ -194,9 +194,10 @@ tasks record their store and can use automatic continuation.
 
 `timeoutSeconds` limits the sending tool's wait, not the receiver's execution
 budget. For nonblocking coordination, use `sessions_send` with `timeoutSeconds: 0`.
-When that wait expires, pending announcements continue observing the accepted
-run until it finishes; a wait interval does not discard a late reply. Nested
-agent-to-agent replies use the same completion observation.
+When that wait expires, the accepted run keeps going in its own session, but
+its late reply is not delivered back and never wakes the caller. Ask the target
+to `sessions_send` its result when the caller needs one, or read the target
+session with `sessions_history`.
 The low-level Gateway `sessions.send` RPC has a different contract: its JSON
 `timeoutMs` limits **receiver execution**, just like `chat.send`. Omit that field
 to keep the receiver's configured budget; bound the CLI wait separately with
@@ -204,8 +205,8 @@ to keep the receiver's configured budget; bound the CLI wait separately with
 
 An accepted result keeps target admission separate from announcement delivery.
 `targetDisposition` is `queued` for a new turn or `steered` for an active turn;
-`delivery.status` describes only the later announcement as `pending` or `skipped`.
-Neither field is a target-completion receipt.
+`delivery.status` describes only the later announcement, which is `skipped` for
+every send to another session. Neither field is a target-completion receipt.
 
 If an idempotent retry finds that the original admission is still pending, the
 tool returns an error with `sentBeforeError: true` and the existing run ID, without
@@ -220,7 +221,7 @@ A waited send that finishes without visible assistant text returns `status: "no_
 
 Thread-scoped chat sessions, such as keys ending in `:thread:<id>`, are not valid `sessions_send` targets. Use the parent channel session key for inter-agent coordination so tool-routed messages do not appear inside an active human-facing thread.
 
-Messages and A2A follow-up replies are marked as inter-session data in the receiving prompt (`[Inter-session message ... isUser=false]`) and in transcript provenance. The receiving agent should treat them as tool-routed data, not as a direct end-user-authored instruction.
+Messages and delivery-failure notices are marked as inter-session data in the receiving prompt (`[Inter-session message ... isUser=false]`) and in transcript provenance. The receiving agent should treat them as tool-routed data, not as a direct end-user-authored instruction.
 
 Agent shell commands must not substitute operator CLI message RPCs for this
 path. With the inherited `OPENCLAW_SHELL=exec` marker, the CLI rejects
@@ -231,11 +232,11 @@ completion. A delivery failure does not authorize switching to the operator CLI.
 This check prevents accidental loss of attribution; the environment marker is
 not authentication or isolation from other processes running as the same OS user.
 
-After an independent peer session responds, OpenClaw can run a **reply-back loop** where the agents alternate messages up to the built-in limit. The target agent can reply `REPLY_SKIP` to stop early. Control UI requesters instead receive the target result once; their human-facing response is not fed back into the target session.
+A peer send runs no reply-back loop. The requester reads the target's answer from the tool result and decides whether to send again, so neither session receives an extra turn carrying that same answer.
 
-Subagent coordination does not use this loop. A child report goes to its recipient once, without an automatic acknowledgment turn in the child. An explicitly waiting caller can still receive the recipient's reply inline. For a new child turn, the child's reply returns inline or is delivered once after the wait expires; the receiver's response is not sent back to the child.
+Child coordination works the same way: a waiting caller receives the child's reply inline, and a reply that lands after the wait stays in the child session. Sub-agent completion reports keep their own [announce path](/tools/subagents/announce), which is separate from `sessions_send`.
 
-Isolated scheduled jobs receive no automatic reply turns, including failure notifications. Their peer-target announcements remain unchanged. If such a scheduled job's wait ends before a native child replies, that reply follows the target's existing announcement path without a reciprocal reply exchange.
+Isolated scheduled jobs receive no automatic reply turns, including failure notifications, and their sends announce nothing to the target's channel.
 
 These reply deliveries apply to new or follow-up turns. `mode: "steer"` returns admission only for guidance added to an active run and leaves completion with that run's existing owner. `mode: "notify"` queues context without starting a turn. Registered task completion and paused-task resume keep their existing completion owner and do not add a second reply delivery.
 

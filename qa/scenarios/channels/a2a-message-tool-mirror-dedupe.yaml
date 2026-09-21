@@ -29,7 +29,7 @@ scenario:
     - docs/concepts/qa-e2e-automation.md
   codeRefs:
     - src/agents/tools/sessions-send-tool.ts
-    - src/agents/tools/sessions-send-tool.a2a.ts
+    - src/agents/tools/sessions-send-tool.self-reply.ts
     - src/agents/run-wait.ts
     - src/agents/agent-run-terminal-receipt.ts
   execution:

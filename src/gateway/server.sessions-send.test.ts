@@ -17,7 +17,7 @@ import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { buildAgentRunTerminalReplySnapshot } from "../agents/agent-run-terminal-reply.js";
 import type { AgentCommandGatewayIngressOpts } from "../agents/command/types.js";
 import { testing as agentStepTesting } from "../agents/tools/agent-step.test-support.js";
-import { runSessionsSendA2AFlow } from "../agents/tools/sessions-send-tool.a2a.js";
+import { runSessionsSendSelfReply } from "../agents/tools/sessions-send-tool.self-reply.js";
 import {
   loadSessionEntry,
   persistSessionTranscriptTurn,
@@ -423,20 +423,11 @@ describe("sessions_send gateway loopback", () => {
           },
         });
 
-        await agentStepTesting.setDepsForTest({
-          agentCommandFromIngress: async () => ({
-            payloads: [{ text: "announce through channel", mediaUrl: null }],
-            meta: { durationMs: 1 },
-          }),
-        });
-
-        await runSessionsSendA2AFlow({
+        await runSessionsSendSelfReply({
           targetAgentId: "main",
           targetSessionKey: "agent:main:whatsapp:direct:peer-1",
           displayKey: "agent:main:whatsapp:direct:peer-1",
-          message: "ping",
           announceTimeoutMs: 5_000,
-          maxPingPongTurns: 0,
           roundOneReply: "target response",
         });
 
@@ -445,7 +436,7 @@ describe("sessions_send gateway loopback", () => {
             expect(sendCalls).toEqual([
               {
                 to: "peer-1",
-                text: "announce through channel",
+                text: "target response",
                 accountId: "work",
                 threadId: "thread-77",
               },
@@ -614,15 +605,13 @@ describe("sessions_send gateway loopback", () => {
           }),
         });
 
-        await runSessionsSendA2AFlow({
+        await runSessionsSendSelfReply({
           targetAgentId: "main",
           targetSessionKey: sessionKey,
           requesterSessionKey: sessionKey,
           requesterChannel: "whatsapp",
           displayKey: sessionKey,
-          message: "proof ping",
           announceTimeoutMs: 5_000,
-          maxPingPongTurns: 0,
           waitRunId: runId,
         });
 
@@ -968,41 +957,16 @@ describe("sessions_send direct-message requester routing", () => {
         }
         expect(targetCall?.inputProvenance?.sourceSessionKey).toBe(expectedReplySessionKey);
 
-        await vi.waitFor(
-          () => {
-            expect(
-              spy.mock.calls.some(([opts]) => {
-                const call = opts as {
-                  sessionKey?: string;
-                  extraSystemPrompt?: string;
-                  inputProvenance?: { sourceSessionKey?: string };
-                };
-                return (
-                  call.sessionKey === expectedReplySessionKey &&
-                  call.inputProvenance?.sourceSessionKey === targetSessionKey &&
-                  call.extraSystemPrompt?.includes("Agent-to-agent reply step")
-                );
-              }),
-            ).toBe(true);
-          },
-          { timeout: 10_000, interval: 25 },
-        );
-        if (expectedReplySessionKey !== requesterSessionKey) {
-          expect(
-            spy.mock.calls.some(([opts]) => {
-              const call = opts as {
-                sessionKey?: string;
-                extraSystemPrompt?: string;
-                inputProvenance?: { sourceSessionKey?: string };
-              };
-              return (
-                call.sessionKey === requesterSessionKey &&
-                call.inputProvenance?.sourceSessionKey === targetSessionKey &&
-                call.extraSystemPrompt?.includes("Agent-to-agent reply step")
-              );
-            }),
-          ).toBe(false);
-        }
+        // The reply returns inline, so no session receives a reply-step turn
+        // carrying the target's answer - not the resolved reply address and
+        // not the raw requester key.
+        expect(
+          spy.mock.calls.some(([opts]) =>
+            (opts as { extraSystemPrompt?: string }).extraSystemPrompt?.includes(
+              "Agent-to-agent reply step",
+            ),
+          ),
+        ).toBe(false);
       } finally {
         testState.sessionConfig = undefined;
         testState.agentsConfig = undefined;

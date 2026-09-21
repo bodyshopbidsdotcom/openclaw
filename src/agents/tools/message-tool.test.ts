@@ -42,7 +42,7 @@ import { createOpenClawTools } from "../openclaw-tools.js";
 import { withGatewayToolCallerIdentity } from "./gateway-caller-context.js";
 import { createMessageTool } from "./message-tool-execution.js";
 import { sanitizeMessageToolVisiblePayload } from "./message-tool-visible-content.js";
-import { runSessionsSendA2AFlow } from "./sessions-send-tool.a2a.js";
+import { runSessionsSendSelfReply } from "./sessions-send-tool.self-reply.js";
 
 type CreateMessageTool = typeof createMessageTool;
 
@@ -713,16 +713,14 @@ describe("message tool gateway timeout", () => {
         }
         return {};
       });
-      await runSessionsSendA2AFlow({
+      await runSessionsSendSelfReply({
         targetAgentId: "main",
         callGateway: gateway,
         targetSessionKey: sessionKey,
         requesterSessionKey: sessionKey,
         requesterChannel: "telegram",
         displayKey: sessionKey,
-        message: "Reply to the source",
         announceTimeoutMs: 10_000,
-        maxPingPongTurns: 0,
         roundOneReply: marker,
         sourceReplyDelivered: delivery?.sourceReplyDelivered,
       });

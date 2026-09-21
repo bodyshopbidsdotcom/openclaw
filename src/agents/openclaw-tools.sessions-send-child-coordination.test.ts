@@ -207,13 +207,13 @@ describe("sessions_send child coordination", () => {
       expect.soft(result.details).toMatchObject({
         status: "ok",
         reply: "Requested result",
-        delivery: { status: child ? "skipped" : "pending" },
+        delivery: { status: "skipped" },
       });
       const agentCalls = calls.filter((call) => call.method === "agent");
       expect
         .soft(agentParams(agentCalls[0] ?? {}).inputProvenance?.sourceRole)
         .toBe(direction === "requester" && child ? "subagent" : undefined);
-      expect.soft(agentCalls).toHaveLength(child ? 1 : 6);
+      expect.soft(agentCalls).toHaveLength(1);
       if (direction === "target") {
         await runOpenClawAgentWriteAdmission(
           toDatabaseOptions(resolveSqliteScope(alternateScope)),
@@ -349,13 +349,13 @@ describe("sessions_send child coordination", () => {
       expect(result.details).toMatchObject({
         status: "ok",
         reply: "Requested result",
-        delivery: { status: expectedChild ? "skipped" : "pending" },
+        delivery: { status: "skipped" },
       });
       const firstAgentCall = calls.find((call) => call.method === "agent");
       expect(agentParams(firstAgentCall ?? {}).inputProvenance?.sourceRole).toBe(
         direction === "requester" && expectedChild ? "subagent" : undefined,
       );
-      expect(calls.filter((call) => call.method === "agent")).toHaveLength(expectedChild ? 1 : 6);
+      expect(calls.filter((call) => call.method === "agent")).toHaveLength(1);
     },
   );
 
@@ -546,7 +546,7 @@ describe("sessions_send child coordination", () => {
       entry: { spawnDepth: 0, spawnedBy: "agent:main:dashboard:parent-uuid" },
     },
   ])(
-    "sessions_send keeps peer A2A for $name without canonical child ownership",
+    "sessions_send keeps peer framing for $name without canonical child ownership",
     async ({ staleAcp, nativeKey = false, entry = {} }) => {
       const requesterKey = "agent:main:dashboard:parent-uuid";
       const targetKey = nativeKey
@@ -596,7 +596,16 @@ describe("sessions_send child coordination", () => {
 
       const waitedDetails = sessionsSendDetails(waited.details);
       expect(waitedDetails.reply).toBe("thread reply");
-      expect(waitedDetails.delivery?.status).toBe("pending");
+      expect(waitedDetails.delivery?.status).toBe("skipped");
+      // Peer classification now shows in the agent-to-agent framing the target
+      // run carries; a child target is addressed without it.
+      expect(
+        agentParams(
+          callGatewayMock.mock.calls
+            .map(([request]) => request as GatewayCall)
+            .find((call) => call.method === "agent") ?? {},
+        ).extraSystemPrompt,
+      ).toContain("Agent-to-agent message context");
     },
   );
 });
