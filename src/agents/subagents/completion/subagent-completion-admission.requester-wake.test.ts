@@ -118,6 +118,67 @@ describe("persisted subagent requester wakes", () => {
     },
   );
 
+  it.each([
+    { delivered: true, status: "delivered" },
+    { delivered: false, status: "failed" },
+  ])(
+    "settles a yielded ACP child whose only task row is ACP-owned (delivered=$delivered)",
+    ({ delivered, status }) => {
+      const input = armRequesterWake(records());
+      Object.assign(input.task, {
+        runtime: "acp",
+        notifyPolicy: "silent",
+        deliveryStatus: "not_applicable",
+      });
+      input.subagent.delivery = {
+        status: "pending",
+        disposition: "intentional_non_delivery",
+        generation: 1,
+      };
+      persistOwner(input);
+
+      settleRequesterCompletionBatch({
+        entries: [{ subagent: input.subagent }],
+        outcome: delivered
+          ? { delivered: true, path: "direct" }
+          : {
+              delivered: false,
+              path: "direct",
+              reason: "visible_reply_missing",
+              disposition: "intentional_non_delivery",
+            },
+        isCurrent: () => true,
+        databaseOptions: { database },
+      });
+
+      const stored = loadSubagentRegistryFromSqlite().get(input.subagent.runId);
+      expect(stored?.delivery?.status).toBe(status);
+      expect(stored?.requesterSettleWake).toBeUndefined();
+      expect(
+        database.db
+          .prepare("SELECT runtime, delivery_status FROM task_runs WHERE task_id = ?")
+          .get(input.task.taskId),
+      ).toEqual({ runtime: "acp", delivery_status: "not_applicable" });
+      expect(systemEvents()).toHaveLength(0);
+    },
+  );
+
+  it("still refuses to settle a yielded child with no task owner", () => {
+    const input = armRequesterWake(records());
+    input.subagent.delivery = { status: "pending", generation: 1 };
+    upsertSubagentRunRowInDatabase(database, bindSubagentRunRecord(input.subagent));
+    subagentRuns.set(input.subagent.runId, input.subagent);
+
+    expect(() =>
+      settleRequesterCompletionBatch({
+        entries: [{ subagent: input.subagent }],
+        outcome: { delivered: true, path: "direct" },
+        isCurrent: () => true,
+        databaseOptions: { database },
+      }),
+    ).toThrow("subagent completion owner changed before settlement");
+  });
+
   it("settles a rejected dispatch transition after rollback without another wake", async () => {
     const input = armRequesterWake(records());
     persistOwner(input);

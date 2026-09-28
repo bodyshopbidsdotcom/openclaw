@@ -20,6 +20,7 @@ import { resolveRequiredCompletionTerminalResult } from "../../tasks/task-comple
 import { bindTaskFlowExecution } from "../../tasks/task-flow-registry.store.sqlite.js";
 import { listTasksForRelatedSessionKey } from "../../tasks/task-registry-query.js";
 import { bindTaskRunExecution } from "../../tasks/task-registry.store.sqlite.js";
+import type { TaskNotifyPolicy } from "../../tasks/task-registry.types.js";
 import { deliveryContextFromSession } from "../../utils/delivery-context.read.js";
 import type { DeliveryContext } from "../../utils/delivery-context.shared.js";
 import { AcpRuntimeError } from "../runtime/errors.js";
@@ -186,6 +187,7 @@ export function createBackgroundTaskRecord(
   context: BackgroundTaskContext,
   startedAt: number,
   instanceId: string,
+  notifyPolicy?: TaskNotifyPolicy,
 ): BackgroundTaskRecord | undefined {
   try {
     const task = createRunningTaskRun({
@@ -201,6 +203,10 @@ export function createBackgroundTaskRecord(
       label: context.label,
       task: context.task,
       startedAt,
+      notifyPolicy,
+      // A silent mirror never delivers; keep its delivery accounting honest
+      // instead of leaving a permanently pending row behind.
+      ...(notifyPolicy === "silent" ? { deliveryStatus: "not_applicable" as const } : {}),
       detail: createNextAcpTaskBackingDetail({
         childSessionKey: context.childSessionKey,
         instanceId,
@@ -263,7 +269,7 @@ export function recordQueuedBackgroundTaskCancellation(params: {
     text: input.text,
   });
   const record = context
-    ? createBackgroundTaskRecord(context, params.startedAt, instanceId)
+    ? createBackgroundTaskRecord(context, params.startedAt, instanceId, input.notifyPolicy)
     : undefined;
   if (!context || !record) {
     return;

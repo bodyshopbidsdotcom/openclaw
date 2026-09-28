@@ -2893,10 +2893,15 @@ describe("gateway agent handler", () => {
           },
           { reqId: "acp-manual-spawn-confirmed", client: backendGatewayClient() },
         );
-        await waitForAgentCommandCall();
+        const confirmedOpts = await waitForAgentCommandCall<{
+          acpManualSpawnOwnsTaskRow?: boolean;
+        }>();
 
         expect(createRunningTaskRunSpy).not.toHaveBeenCalled();
         expect(findTaskByRunId("acp-manual-spawn-confirmed")).toBeUndefined();
+        // The replacement `acp` row settles through subagent_settle, so the turn
+        // must tell the ACP manager to keep that row silent.
+        expect(confirmedOpts.acpManualSpawnOwnsTaskRow).toBe(true);
       });
     });
 
@@ -2956,9 +2961,14 @@ describe("gateway agent handler", () => {
           },
           { reqId: "acp-operator-write", client: operatorWriteGatewayClient() },
         );
-        await waitForAgentCommandCall();
+        const operatorWriteOpts = await waitForAgentCommandCall<{
+          acpManualSpawnOwnsTaskRow?: boolean;
+        }>();
 
         expect(createRunningTaskRunSpy).toHaveBeenCalledTimes(1);
+        // This caller owns no replacement `acp` row, so its mirrored task keeps
+        // the requester wake it is the only source of.
+        expect(operatorWriteOpts.acpManualSpawnOwnsTaskRow).toBe(false);
         expectRecordFields(mockCallArg(createRunningTaskRunSpy), {
           runtime: "cli",
           runId: "acp-operator-write",

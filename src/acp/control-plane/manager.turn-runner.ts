@@ -96,6 +96,7 @@ export async function runManagerTurn(params: {
         taskContext,
         turnStartedAt,
         input.admittedRunContext.operationalRunInstance.instanceId,
+        input.notifyPolicy,
       )
     : undefined;
   let taskExecutionBinding: Promise<void> | undefined;

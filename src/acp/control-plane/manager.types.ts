@@ -17,6 +17,7 @@ import type {
   SessionEntry,
 } from "../../config/sessions/types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import type { TaskNotifyPolicy } from "../../tasks/task-registry.types.js";
 import type { AcpRuntimeError } from "../runtime/errors.js";
 import { getAcpRuntimeBackend, requireAcpRuntimeBackend } from "../runtime/registry.js";
 import {
@@ -79,6 +80,8 @@ export type AcpRunTurnInput = {
   attachments?: AcpTurnAttachment[];
   mode: AcpRuntimePromptMode;
   requestId: string;
+  /** Notify policy for the mirrored requester task; omitted keeps the task owner's default. */
+  notifyPolicy?: TaskNotifyPolicy;
   signal?: AbortSignal;
   onElicitation?: AcpElicitationHandler;
   /** Throwable host admission fence immediately before runtime prompt submission. */

@@ -39,6 +39,8 @@ export type PreparedAgentRunDispatch = {
   lifecycleStorePath: string;
   resolvedThreadId?: string | number;
   dispatchTaskTrackingMode: GatewayAgentDispatchTaskTracking;
+  /** The spawn turn owning the replacement `acp` task row; its requester wake is subagent_settle. */
+  confirmedAcpManualSpawn: boolean;
   preparedModelRuntimeLease: PreparedModelRuntimeLease;
   replyDispatchRuntime: PreparedReplyDispatchRuntime;
   unpersistedOffloadedRefs: OffloadedRef[];

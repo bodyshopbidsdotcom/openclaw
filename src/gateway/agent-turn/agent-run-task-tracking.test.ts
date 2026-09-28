@@ -135,7 +135,10 @@ describe("prepareAgentRunTaskTracking", () => {
       expect(completed).toBe(false);
       expect(mocks.registerSubagentRun).not.toHaveBeenCalled();
       lookup.resolve(task);
-      await expect(preparation).resolves.toEqual({ taskTrackingMode: expected });
+      await expect(preparation).resolves.toEqual({
+        taskTrackingMode: expected,
+        confirmedAcpManualSpawn: false,
+      });
       expect(mocks.findTaskByRunId).not.toHaveBeenCalled();
     } finally {
       lookup.resolve(task);
@@ -150,7 +153,10 @@ describe("prepareAgentRunTaskTracking", () => {
       await Promise.resolve();
       expect(mocks.registerSubagentRun).not.toHaveBeenCalled();
       lookup.resolve(undefined);
-      await expect(preparation).resolves.toEqual({ taskTrackingMode: "plugin_subagent" });
+      await expect(preparation).resolves.toEqual({
+        taskTrackingMode: "plugin_subagent",
+        confirmedAcpManualSpawn: false,
+      });
       expect(mocks.registerSubagentRun).toHaveBeenCalledOnce();
       expect(mocks.registerSubagentRun).toHaveBeenCalledWith(
         expect.objectContaining({ runId, childSessionKey, task: "Continue the child task" }),
@@ -233,6 +239,7 @@ describe("prepareAgentRunTaskTracking", () => {
   ])("does not query tasks for a $name", async ({ overrides, expected }) => {
     await expect(prepareAgentRunTaskTracking(parameters(overrides))).resolves.toEqual({
       taskTrackingMode: expected,
+      confirmedAcpManualSpawn: false,
     });
     expect(mocks.findTaskViewByRunIdAsync).not.toHaveBeenCalled();
     expect(mocks.findTaskByRunId).not.toHaveBeenCalled();
@@ -255,6 +262,7 @@ describe("prepareAgentRunTaskTracking", () => {
     mocks.prepareParentSubagentResume.mockResolvedValue(adoptParentResume);
     await expect(prepareAgentRunTaskTracking(parameters({ client }))).resolves.toEqual({
       taskTrackingMode: "none",
+      confirmedAcpManualSpawn: false,
       adoptParentResume,
     });
     expect(mocks.prepareParentSubagentResume).toHaveBeenCalledWith(

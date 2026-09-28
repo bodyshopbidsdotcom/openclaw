@@ -172,6 +172,9 @@ export async function runAcpAgentCommand(params: {
       attachments: acpImageAttachments.length > 0 ? acpImageAttachments : undefined,
       mode: "prompt",
       requestId: params.runId,
+      // sessions_spawn children settle through subagent_settle; a notifying mirror
+      // task would wake the requester a second time for the same run.
+      ...(params.opts.acpManualSpawnOwnsTaskRow ? { notifyPolicy: "silent" as const } : {}),
       signal: params.opts.abortSignal,
       onElicitation,
       onBeforePrompt: async () => {
