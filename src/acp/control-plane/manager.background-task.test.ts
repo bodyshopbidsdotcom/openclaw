@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AdmittedRunContext } from "../../agents/admitted-run-context.js";
 import { createExecutionIdentityAdmissionToken } from "../../audit/execution-identity-admission.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import { waitForAssertion } from "../../gateway/server-methods/agent-clock.test-helpers.js";
 import { tableExists } from "../../state/openclaw-state-db-schema-helpers.js";
 import {
   closeOpenClawStateDatabaseForTest,
@@ -119,6 +120,51 @@ describe("resolveBackgroundTaskFailureStatus", () => {
         new AcpRuntimeError("ACP_TURN_FAILED", "backend said the request timed out"),
       ),
     ).toBe("failed");
+  });
+});
+
+describe("ACP background task requester notification", () => {
+  const spawnContext = {
+    agentId: "qa",
+    requesterAgentId: "main",
+    requesterSessionKey: "agent:main:main",
+    childSessionKey: "agent:qa:child",
+    runId: "run-acp-notify",
+    task: "Append a line to the file",
+  };
+
+  it.each([
+    {
+      name: "does not wake the requester for a sessions_spawn turn that settles through subagent_settle",
+      notifyPolicy: "silent" as const,
+      expectedPolicy: "silent",
+      expectedDeliveryStatus: "not_applicable",
+    },
+    {
+      name: "still wakes the requester for an ACP turn that owns no other completion path",
+      notifyPolicy: undefined,
+      expectedPolicy: "done_only",
+      expectedDeliveryStatus: "session_queued",
+    },
+  ])("$name", async ({ notifyPolicy, expectedPolicy, expectedDeliveryStatus }) => {
+    await withOpenClawTestState({ layout: "state-only" }, async () => {
+      const record = createBackgroundTaskRecord(spawnContext, 100, "instance-1", notifyPolicy);
+      if (!record) {
+        throw new Error("Expected the mirrored ACP task");
+      }
+      markBackgroundTaskTerminal(record, { status: "succeeded", endedAt: 200 });
+
+      // "session_queued" is the requester wake being queued; anything else means
+      // the generic background-task heartbeat never fired for this run.
+      await waitForAssertion(() =>
+        expect(getTaskById(record.taskId)).toMatchObject({
+          runtime: "acp",
+          status: "succeeded",
+          notifyPolicy: expectedPolicy,
+          deliveryStatus: expectedDeliveryStatus,
+        }),
+      );
+    });
   });
 });
 

@@ -232,6 +232,12 @@ export type AgentCommandOpts = {
   promptMode?: PromptMode;
   /** Internal ACP-ready session turn source. Manual spawn turns bypass only the dispatch gate. */
   acpTurnSource?: AcpTurnSource;
+  /**
+   * Gateway-confirmed sessions_spawn turn that owns the replacement `acp` task row.
+   * The subagent registry owns this run's requester wake, so the mirrored task must
+   * not raise a second background-task notification.
+   */
+  acpManualSpawnOwnsTaskRow?: boolean;
   /** Internal handoffs can feed the model without writing the synthetic prompt to transcript. */
   suppressPromptPersistence?: boolean;
   /** Gateway/channel ingress can provide a canonical user-turn persistence owner. */

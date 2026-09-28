@@ -218,6 +218,14 @@ export function settleSubagentCompletionDelivery(params: {
   );
 }
 
+// ACP spawns keep only the ACP manager's task row, never a subagent projection.
+function isTaskOwnedByAcp(database: OpenClawStateDatabase, subagent: SubagentRunRecord): boolean {
+  return (
+    findTaskRecordByRunIdForViewInDatabase(database.db, subagent.taskRunId ?? subagent.runId)
+      ?.runtime === "acp"
+  );
+}
+
 function retiredCancellationEndedAt(subagent: SubagentRunRecord, now: number): number | undefined {
   const endedAt = subagent.execution.endedAt;
   if (
@@ -309,6 +317,8 @@ type BlockSubagentCompletionParams = {
   storeReplaced?: true;
   lastDropReason?: NonNullable<SubagentRunRecord["delivery"]>["lastDropReason"];
   disposition?: NonNullable<SubagentRunRecord["delivery"]>["disposition"];
+  /** The ACP manager owns this run's only task row; settle the subagent side alone. */
+  taskOwnedByAcp?: boolean;
   databaseOptions?: OpenClawStateDatabaseOptions;
 };
 
@@ -329,7 +339,13 @@ function prepareBlockedSubagentCompletion(
 ): CompletionMutation | undefined {
   const generation = params.subagent.delivery?.generation ?? 1;
   const task = readTaskRecord(database.db, params.taskId);
-  if (subagent && !task && !params.taskId && params.suspendedReason === undefined) {
+  if (
+    subagent &&
+    !task &&
+    !params.taskId &&
+    !params.taskOwnedByAcp &&
+    params.suspendedReason === undefined
+  ) {
     const endedAt = retiredCancellationEndedAt(subagent, now);
     // Old cancellation cleanup can outlive its task's retention window.
     // Recover that exact completed owner without recreating historical work.
@@ -355,23 +371,25 @@ function prepareBlockedSubagentCompletion(
   }
   if (
     !subagent ||
-    !task ||
-    task.runtime !== "subagent" ||
+    (task
+      ? task.runtime !== "subagent" || (subagent.taskRunId ?? subagent.runId) !== task.runId
+      : params.taskId || !params.taskOwnedByAcp) ||
     subagent.execution.status !== "terminal" ||
     subagent.expectsCompletionMessage !== true ||
-    (subagent.taskRunId ?? subagent.runId) !== task.runId ||
     (subagent.delivery?.generation ?? 1) !== generation
   ) {
     return undefined;
   }
-  const successful = task.status === "succeeded" && subagent.execution.outcome?.status === "ok";
+  const successful =
+    (task ? task.status === "succeeded" : true) && subagent.execution.outcome?.status === "ok";
   // A cancelled yielded run may never capture a reply. Compare execution
   // outcomes, not reply readiness; missing or superseded owners still refuse settlement.
   if (
     !successful &&
     ((params.suspendedReason !== undefined && !params.storeReplaced) ||
-      !["cancelled", "failed", "timed_out"].includes(task.status) ||
-      resolveSubagentTaskTerminalStatus(subagent) !== task.status ||
+      (task &&
+        (!["cancelled", "failed", "timed_out"].includes(task.status) ||
+          resolveSubagentTaskTerminalStatus(subagent) !== task.status)) ||
       !["pending", "in_progress", "failed"].includes(subagent.delivery?.status ?? "pending"))
   ) {
     return undefined;
@@ -417,6 +435,9 @@ function prepareBlockedSubagentCompletion(
     }
   } else {
     subagent.suppressCompletionDelivery = true;
+  }
+  if (!task) {
+    return { subagent };
   }
   if (successful && !params.storeReplaced) {
     const terminal = resolveRequiredCompletionDeliveryFailureTerminalResult(params.reason);
@@ -599,12 +620,14 @@ export function settleRequesterCompletionBatch(params: {
           (["pending", "in_progress"].includes(subagent.delivery?.status ?? "pending") ||
             acknowledgeExpiredDelivery)
         ) {
+          const taskOwnedByAcp = !taskId && isTaskOwnedByAcp(database, subagent);
           if (params.outcome.delivered) {
-            const task = readTaskRecord(database.db, taskId ?? "");
+            const task = taskOwnedByAcp ? undefined : readTaskRecord(database.db, taskId ?? "");
             if (
-              !task ||
-              task.runtime !== "subagent" ||
-              task.runId !== (subagent.taskRunId ?? subagent.runId)
+              !taskOwnedByAcp &&
+              (!task ||
+                task.runtime !== "subagent" ||
+                task.runId !== (subagent.taskRunId ?? subagent.runId))
             ) {
               throw changedOwner();
             }
@@ -618,7 +641,7 @@ export function settleRequesterCompletionBatch(params: {
               lastDropReason: undefined,
             });
             clearSubagentPendingDelivery(subagent);
-            if (acknowledgeExpiredDelivery) {
+            if (task && acknowledgeExpiredDelivery) {
               const finalized = resolveFinalizedSubagentTaskState(subagent);
               if (!finalized || finalized.status !== task.status) {
                 throw changedOwner();
@@ -630,8 +653,10 @@ export function settleRequesterCompletionBatch(params: {
                 terminalSummary: finalized.terminalSummary ?? undefined,
               });
             }
-            Object.assign(task, { deliveryStatus: "delivered", lastEventAt: now });
-            mutation.task = task;
+            if (task) {
+              Object.assign(task, { deliveryStatus: "delivered", lastEventAt: now });
+              mutation.task = task;
+            }
           } else {
             const blocked = prepareBlockedSubagentCompletion(
               database,
@@ -643,6 +668,7 @@ export function settleRequesterCompletionBatch(params: {
                 disposition: params.outcome.disposition,
                 storeReplaced: params.outcome.storeReplaced,
                 suspendedReason: params.outcome.storeReplaced ? "permanent_failure" : undefined,
+                taskOwnedByAcp,
               },
               now,
               subagent,

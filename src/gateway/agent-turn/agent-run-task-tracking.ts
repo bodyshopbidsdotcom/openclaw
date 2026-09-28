@@ -140,11 +140,17 @@ export async function prepareAgentRunTaskTracking(params: {
   getAdmittedSessionId: () => string;
   assertResumeAdmissionCurrent: () => void;
   context: Pick<AgentTurnContext, "logGateway" | "resolveGatewayContext">;
-}): Promise<{ taskTrackingMode: GatewayAgentTaskTrackingMode; adoptParentResume?: () => string }> {
+}): Promise<{
+  taskTrackingMode: GatewayAgentTaskTrackingMode;
+  /** True only for the trusted backend spawn turn that owns the replacement `acp` task row. */
+  confirmedAcpManualSpawn: boolean;
+  adoptParentResume?: () => string;
+}> {
   const resume = readInProcessSubagentResume(params.client?.internal);
   if (resume) {
     return {
       taskTrackingMode: "none",
+      confirmedAcpManualSpawn: false,
       adoptParentResume: await prepareParentSubagentResume({
         cfg: params.cfg,
         resume,
@@ -162,18 +168,19 @@ export async function prepareAgentRunTaskTracking(params: {
       ? await findTaskViewByRunIdAsync(params.runId, params.assertResumeAdmissionCurrent)
       : undefined;
   params.assertResumeAdmissionCurrent();
+  const confirmedAcpManualSpawn = isConfirmedAcpManualSpawnTaskOwner({
+    acpTurnSource: params.request.acpTurnSource,
+    sessionKey: params.resolvedSessionKey,
+    client: params.client,
+    logGateway: params.context.logGateway,
+  });
   const taskTrackingMode = resolveGatewayAgentTaskTrackingMode({
     client: params.client,
     sessionKey: params.resolvedSessionKey,
     inputProvenance: params.inputProvenance,
     canUseInternalRuntimeHandoff: params.canUseInternalRuntimeHandoff,
     sessionEntry: params.sessionEntry,
-    confirmedAcpManualSpawn: isConfirmedAcpManualSpawnTaskOwner({
-      acpTurnSource: params.request.acpTurnSource,
-      sessionKey: params.resolvedSessionKey,
-      client: params.client,
-      logGateway: params.context.logGateway,
-    }),
+    confirmedAcpManualSpawn,
     modelRun: params.isOneShotModelRun,
     existingTask,
   });
@@ -198,5 +205,5 @@ export async function prepareAgentRunTaskTracking(params: {
       });
     }
   }
-  return { taskTrackingMode };
+  return { taskTrackingMode, confirmedAcpManualSpawn };
 }

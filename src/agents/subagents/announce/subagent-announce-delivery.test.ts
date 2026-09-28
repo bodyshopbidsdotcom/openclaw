@@ -5296,11 +5296,11 @@ describe("deliverSubagentAnnouncement completion delivery", () => {
       expected: missingRequesterFinal,
     },
     {
-      name: "rejects a yielded turn that emits only the silent reply token",
+      name: "accepts a yielded turn that completes with only the silent reply token",
       routes: requesterSettleRoutes,
-      response: { result: { payloads: [{ text: "NO_REPLY" }] } },
+      response: { result: { meta: { finalAssistantRawText: "NO_REPLY" } } },
       requireVisibleReply: true,
-      expected: missingRequesterFinal,
+      expected: deliveredRequesterFinal,
     },
     {
       name: "rejects a visible final whose delivery was suppressed",

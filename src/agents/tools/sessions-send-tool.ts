@@ -88,8 +88,8 @@ import {
 } from "./sessions-helpers.js";
 import { buildAgentToAgentMessageContext } from "./sessions-send-helpers.js";
 import { captureSessionsSendResumeCaller, resumeSessionsSendTask } from "./sessions-send-resume.js";
-import { runSessionsSendA2AFlow } from "./sessions-send-tool.a2a.js";
 import { startSessionsSendAgentRun } from "./sessions-send-tool.delivery.js";
+import { runSessionsSendSelfReply } from "./sessions-send-tool.self-reply.js";
 
 const SessionsSendToolSchema = Type.Object({
   sessionKey: Type.Optional(Type.String()),
@@ -762,13 +762,10 @@ export function createSessionsSendTool(opts?: {
       const announceTimeoutMs = timeoutSeconds === 0 ? 30_000 : timeoutMs;
       const idempotencyKey = opts?.idempotencyKey ?? crypto.randomUUID();
       let runId: string = idempotencyKey;
+      const isSelfSend = requesterSessionKey === resolvedKey && targetAgentId === requesterAgentId;
       // Fire-and-forget self-send remains a channel-delivery path. A synchronous
       // self-send would wait behind its own active session lane until timeout.
-      if (
-        timeoutSeconds !== 0 &&
-        requesterSessionKey === resolvedKey &&
-        targetAgentId === requesterAgentId
-      ) {
+      if (timeoutSeconds !== 0 && isSelfSend) {
         return jsonResult({
           runId,
           status: "error",
@@ -984,13 +981,15 @@ export function createSessionsSendTool(opts?: {
             targetSessionEntryWithAcp,
             effectiveRequesterKey,
           );
-          // Child reports, registered tasks, and exact-incarnation grants own their completion.
-          const replyMode =
-            requesterIsSubagent || skipTaskReplyFlow || expectedSessionId
-              ? undefined
-              : targetIsSubagent && !isIsolatedCronRequester
-                ? "one-way"
-                : "peer";
+          // A send never wakes another session with the target's answer. A waited
+          // send already carries that answer back inline and a fire-and-forget send
+          // returns at admission, so announcing it again would repeat the same
+          // message into the requester and the target. A self-send has no other
+          // session to wake: its flow only routes the caller's own answer to the
+          // caller's own channel, so it is kept. Child reports, registered tasks,
+          // and exact-incarnation grants own their completion.
+          const deliversSelfReply =
+            isSelfSend && !requesterIsSubagent && !skipTaskReplyFlow && !expectedSessionId;
 
           const start = await startSessionsSendAgentRun({
             cfg,
@@ -1016,18 +1015,12 @@ export function createSessionsSendTool(opts?: {
             return start.result;
           }
           const acceptedTargetSessionKey = start.a2aSessionKey ?? resolvedKey;
-          // Steering keeps its active owner; an inline child reply is already delivered.
-          const delayedDelivery = {
+          // Steering keeps its active owner, and only a self-send still announces.
+          const delivery = {
             status:
-              replyMode !== undefined && start.targetDisposition === "queued"
-                ? "pending"
-                : "skipped",
+              deliversSelfReply && start.targetDisposition === "queued" ? "pending" : "skipped",
             mode: "announce",
           } as const;
-          const delivery =
-            timeoutSeconds > 0 && targetIsSubagent
-              ? ({ status: "skipped", mode: "announce" } as const)
-              : delayedDelivery;
           recordSessionToolActionFact({
             operation: "send",
             fact: "committed",
@@ -1062,14 +1055,8 @@ export function createSessionsSendTool(opts?: {
           }
           runId = start.runId;
           const watchField = registerWatchIfRequested(acceptedTargetSessionKey);
-          const startReplyFlow = ({
-            reply,
-            notifyRequesterOnWaitFailure = false,
-          }: {
-            reply?: Awaited<ReturnType<typeof waitForAgentRunReply>>;
-            notifyRequesterOnWaitFailure?: boolean;
-          }) => {
-            if ((reply ? delivery : delayedDelivery).status === "skipped") {
+          const startReplyFlow = () => {
+            if (delivery.status === "skipped") {
               return;
             }
             // Detached turns must not retain the caller's resource or runtime generation scope.
@@ -1078,38 +1065,31 @@ export function createSessionsSendTool(opts?: {
                 () =>
                   runOutsidePreparedModelRuntimePluginGenerationScope(() =>
                     runWithoutOwnedSessionTranscriptWrites(() =>
-                      runSessionsSendA2AFlow({
+                      runSessionsSendSelfReply({
                         callGateway: gatewayCall,
                         targetSessionKey: acceptedTargetSessionKey,
                         targetAgentId,
                         displayKey: start.a2aSessionKey ?? displayKey,
-                        message,
                         announceTimeoutMs,
-                        // Isolated Cron jobs retain target announcements without requester turns.
-                        maxPingPongTurns: isIsolatedCronRequester ? 0 : 5,
-                        replyMode,
                         requesterSessionKey: replyRequesterSessionKey,
                         requesterAgentId,
                         requesterChannel,
-                        roundOneReply: reply?.replyText,
-                        sourceReplyDelivered: reply?.sourceReplyDelivered,
-                        waitRunId: reply ? undefined : runId,
-                        notifyRequesterOnWaitFailure:
-                          notifyRequesterOnWaitFailure && !isIsolatedCronRequester,
+                        waitRunId: runId,
+                        notifyRequesterOnWaitFailure: !isIsolatedCronRequester,
                       }),
                     ),
                   ),
                 "session:a2a-send",
               ),
             ).catch((err: unknown) => {
-              log.warn("sessions_send announce flow admission failed", {
+              log.warn("sessions_send self reply flow admission failed", {
                 runId,
                 error: formatErrorMessage(err),
               });
             });
           };
           if (timeoutSeconds === 0) {
-            startReplyFlow({ notifyRequesterOnWaitFailure: true });
+            startReplyFlow();
             return jsonResult({
               runId,
               status: "accepted",
@@ -1128,25 +1108,23 @@ export function createSessionsSendTool(opts?: {
 
           if (result.status === "timeout") {
             if (isPendingErrorAgentWaitTimeout(result)) {
-              startReplyFlow({ notifyRequesterOnWaitFailure: targetIsSubagent });
               return jsonResult({
                 runId,
                 status: "timeout",
                 error: result.error,
                 sentBeforeError: true,
                 sessionKey: displayKey,
-                delivery: delayedDelivery,
+                delivery,
                 ...watchField,
               });
             }
             if (!isTerminalAgentWaitTimeout(result)) {
-              startReplyFlow({ notifyRequesterOnWaitFailure: true });
               return jsonResult({
                 runId,
                 status: "accepted",
                 sessionKey: displayKey,
                 targetDisposition: start.targetDisposition,
-                delivery: delayedDelivery,
+                delivery,
                 ...watchField,
               });
             }
@@ -1178,9 +1156,6 @@ export function createSessionsSendTool(opts?: {
                   ? "The target delivered its final reply directly to its source conversation. Do not resend."
                   : NO_REPLY_MESSAGE,
               };
-          if (reply) {
-            startReplyFlow({ reply: result });
-          }
           return jsonResult({ runId, sessionKey: displayKey, ...response, ...watchField });
         },
       });

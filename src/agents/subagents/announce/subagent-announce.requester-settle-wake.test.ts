@@ -391,7 +391,11 @@ describe("maybeWakeRequesterAfterAllChildrenSettled", () => {
     expect(deliverSpy).toHaveBeenCalledOnce();
     expect(deliveredCallArg().requireVisibleReply).toBe(true);
     const message = String(deliveredCallArg().triggerMessage);
-    expect(message).not.toContain("NO_REPLY");
+    expect(message).toContain("requires your visible final answer");
+    expect(message).toContain(
+      "If you already delivered that answer another way (for example with sessions_send or the message tool), reply ONLY: NO_REPLY.",
+    );
+    expect(message).not.toContain("already delivered the consolidated final answer");
     expect(message).toContain("in-scope fixable blockers require continued work");
     expect(deliveredCallArg().directIdempotencyKey).toBe(requesterSettleKey("run-b:yield-1"));
     expect(completeBatchSpy).toHaveBeenCalledWith(["run-b"], 1, {

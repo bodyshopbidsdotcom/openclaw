@@ -235,7 +235,7 @@ function modelDefinition(id: string): ModelDefinitionConfig {
 
 describe("sessions_send across prepared runtime reload", () => {
   it(
-    "finishes model-A work and re-admits the detached reply and announcement on model B",
+    "finishes model-A work across a prepared runtime reload without announcing back",
     { timeout: 90_000 },
     async () => {
       const provider = await startProvider();
@@ -399,21 +399,14 @@ describe("sessions_send across prepared runtime reload", () => {
         terminalReply: { disposition: "visible", text: TARGET_REPLY },
       });
 
-      phase = "waiting for detached reply";
-      await expect
-        .poll(() => provider.calls.filter((call) => call.kind === "reply").length, {
-          timeout: 20_000,
-          interval: 50,
-        })
-        .toBe(1);
-      await expect
-        .poll(
-          () =>
-            getActiveGatewayRootWorkHolders().filter((origin) => origin === "session:a2a-send")
-              .length,
-          { timeout: 20_000, interval: 50 },
-        )
-        .toBe(0);
+      phase = "checking for detached announce work";
+      // A send never wakes another session with the target's answer. The A2A
+      // flow registers its detached root work synchronously inside the send, so
+      // a surviving reply or announcement still holds that work here, after the
+      // target turn finished and the reload swapped the primary model.
+      expect(
+        getActiveGatewayRootWorkHolders().filter((origin) => origin === "session:a2a-send"),
+      ).toEqual([]);
 
       const target = readSessionStoreSummaryReadOnly(
         { agentId: "target", env: process.env },
@@ -426,8 +419,6 @@ describe("sessions_send across prepared runtime reload", () => {
           expect.objectContaining({ kind: "dispatch", model: "model-a" }),
           expect.objectContaining({ kind: "target", model: "model-a" }),
           expect.objectContaining({ kind: "dispatch-complete", model: "model-a" }),
-          expect.objectContaining({ kind: "reply", model: "model-b" }),
-          expect.objectContaining({ kind: "announce", model: "model-b" }),
         ]),
       );
       const dispatchComplete = provider.calls.find((call) => call.kind === "dispatch-complete");
@@ -435,9 +426,9 @@ describe("sessions_send across prepared runtime reload", () => {
       expect(readTargetToolResult(dispatchComplete?.raw ?? "")).toMatchObject({
         targetDisposition: "queued",
       });
-      expect(provider.calls.filter((call) => call.kind === "reply")).toHaveLength(1);
       expect(provider.calls.filter((call) => call.kind === "target")).toHaveLength(1);
-      expect(provider.calls.filter((call) => call.kind === "announce")).toHaveLength(1);
+      expect(provider.calls.filter((call) => call.kind === "reply")).toEqual([]);
+      expect(provider.calls.filter((call) => call.kind === "announce")).toEqual([]);
     },
   );
 });

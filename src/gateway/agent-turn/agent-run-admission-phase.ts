@@ -408,7 +408,7 @@ export async function prepareAgentRunDispatch(
   } catch (err) {
     return rejectPreaccept(errorShapeFromError(ErrorCodes.UNAVAILABLE, err));
   }
-  const { taskTrackingMode, adoptParentResume } = taskTracking;
+  const { taskTrackingMode, confirmedAcpManualSpawn, adoptParentResume } = taskTracking;
   let restoreAdmittedRestartRecoveryInterrupted:
     | (() => Promise<MainSessionRecoveryPendingTarget | undefined>)
     | undefined;
@@ -686,6 +686,7 @@ export async function prepareAgentRunDispatch(
       lifecycleStorePath,
       resolvedThreadId,
       dispatchTaskTrackingMode,
+      confirmedAcpManualSpawn,
       preparedModelRuntimeLease,
       replyDispatchRuntime,
       unpersistedOffloadedRefs: userTurn.recorder ? [] : params.offloadedRefs,

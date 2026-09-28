@@ -515,6 +515,7 @@ export async function startAgentRunExecution(params: {
                     ?.requireExplicitMessageTarget,
                 cliSessionBindingFacts: params.restoredCronContinuation?.cliSessionBindingFacts,
                 acpTurnSource: params.request.acpTurnSource,
+                acpManualSpawnOwnsTaskRow: prepared.confirmedAcpManualSpawn,
                 internalEvents: params.request.internalEvents,
                 runtimeContextFragments: params.client?.internal?.runtimeContextFragments,
                 inputProvenance: params.inputProvenance,

@@ -42,7 +42,7 @@ export function buildRequesterSettleWakeMessage(params: {
     params.parentOnly
       ? `[Subagent Context] ${SUBAGENT_PRIVATE_COMPLETION_INSTRUCTION}`
       : params.requireVisibleReply
-        ? "[Subagent Context] Child completion delivery is internal; the original user request still requires your visible final answer only after the requested outcome is complete or genuinely blocked."
+        ? `[Subagent Context] Child completion delivery is internal; the original user request still requires your visible final answer only after the requested outcome is complete or genuinely blocked. If you already delivered that answer another way (for example with sessions_send or the message tool), reply ONLY: ${SILENT_REPLY_TOKEN}.`
         : `[Subagent Context] Reply ONLY: ${SILENT_REPLY_TOKEN} only if you already delivered the consolidated final answer for this batch.`,
     ...(modelRouteChange
       ? [

@@ -6,7 +6,7 @@ import {
   callAgentToolGatewayRequest,
   runWithGatewayToolContinuationContext,
 } from "../agents/tools/in-process-gateway.js";
-import { runSessionsSendA2AFlow } from "../agents/tools/sessions-send-tool.a2a.js";
+import { runSessionsSendSelfReply } from "../agents/tools/sessions-send-tool.self-reply.js";
 import { upsertSessionEntryCore } from "../config/sessions/session-accessor.js";
 import { withPluginRuntimeGatewayRequestScope } from "../plugins/runtime/gateway-request-scope.js";
 import { createDeferredCore } from "../shared/deferred.js";
@@ -143,12 +143,7 @@ describe("typed in-process agent continuation authorization", () => {
           waitStarted.resolve();
           await targetFinished.promise;
         }
-        return {
-          result: {
-            status: "ok",
-            terminalReply: { disposition: "visible", text: "Target work finished" },
-          },
-        };
+        return { result: { status: "error", error: "Target work failed" } };
       });
       startTurn.mockImplementation(async ({ principal, io, preflight: { request } }) => {
         expect(principal.connect.scopes).toEqual(["operator.write"]);
@@ -173,18 +168,18 @@ describe("typed in-process agent continuation authorization", () => {
               },
               async () => {
                 const pending = runWithGatewayToolContinuationContext(() =>
-                  runSessionsSendA2AFlow({
+                  // A self-send's failure notice is the detached turn that
+                  // still reaches the requester after the tool call returns.
+                  runSessionsSendSelfReply({
                     targetAgentId: "main",
-                    targetSessionKey: "agent:main:child",
-                    displayKey: "agent:main:child",
+                    targetSessionKey: "agent:main:requester",
+                    displayKey: "agent:main:requester",
                     requesterAgentId: "main",
                     requesterSessionKey: "agent:main:requester",
                     requesterChannel: "webchat",
-                    replyMode: "one-way",
-                    message: "Finish the task",
                     waitRunId: "target-followup",
                     announceTimeoutMs: 10_000,
-                    maxPingPongTurns: 0,
+                    notifyRequesterOnWaitFailure: true,
                     callGateway: async (request) => {
                       try {
                         return await callAgentToolGatewayRequest(request);
@@ -221,8 +216,8 @@ describe("typed in-process agent continuation authorization", () => {
         expect(startTurn.mock.calls[0]?.[0].preflight.request).toMatchObject({
           sessionKey: "agent:main:requester",
           inputProvenance: {
-            sourceTool: "subagent_announce",
-            sourceSessionKey: "agent:main:child",
+            sourceTool: "sessions_send",
+            sourceSessionKey: "agent:main:requester",
           },
         });
       } finally {

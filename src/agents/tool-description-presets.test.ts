@@ -79,7 +79,10 @@ describe("sessions_send tool description", () => {
     expect(describeSessionsSendTool()).toContain("on this Gateway");
     expect(describeSessionsSendTool()).toContain("not an external address");
     expect(describeSessionsSendTool()).not.toContain("conversations_");
-    expect(describeSessionsSendTool()).toContain("reply may still announce");
+    expect(describeSessionsSendTool()).toContain("never announces back into yours");
+    expect(describeSessionsSendTool()).toContain(
+      "the target may still surface its own answer in its established delivery context",
+    );
     expect(describeSessionsSendTool()).toContain('`targetDisposition: "queued"` or `"steered"`');
     expect(describeSessionsSendTool()).toContain("neither proves target completion");
   });
