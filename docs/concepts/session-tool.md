@@ -255,7 +255,7 @@ delivery records and does not resume these replies.
 
 A waited send that finishes without visible assistant text returns `status: "no_reply"`; no announcement remains pending. If the target delivered its final reply directly, the result says so and tells the caller not to resend. Otherwise, continue without waiting or send a new message if a response is required.
 
-Thread-scoped chat sessions, such as keys ending in `:thread:<id>`, are not valid `sessions_send` targets. Use the parent channel session key for inter-agent coordination so tool-routed messages do not appear inside an active human-facing thread.
+Thread-scoped chat sessions, such as keys ending in `:thread:<id>`, are valid `sessions_send` targets. The target run receives the exact thread session key and runs on the internal channel with delivery disabled and the `message_tool_only` source-reply policy, so its final reply is not posted into the human-facing thread; the receiving agent must call `message` to post there. The later peer announcement step still delivers a non-skipped announcement to the target's route, which for a thread session is the thread itself; the target suppresses it by replying `ANNOUNCE_SKIP`.
 
 Messages and A2A follow-up replies are marked as inter-session data in the receiving prompt (`[Inter-session message ... isUser=false]`) and in transcript provenance. The receiving agent should treat them as tool-routed data, not as a direct end-user-authored instruction.
 
