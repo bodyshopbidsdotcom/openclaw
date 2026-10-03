@@ -101,7 +101,7 @@ export function describeSessionsSearchTool(options?: SessionLinkDescriptionOptio
 export function describeSessionsSendTool(): string {
   return [
     "Run a visible session on this Gateway by sessionKey/label, or a configured local agent by agentId; sessionKey wins redundant label.",
-    "A session identifies model context, not an external address; the target may still surface its own answer in its established delivery context.",
+    "A session identifies model context, not an external address; the target posts its own answer to its conversation only by calling `message`.",
     SESSIONS_SEND_RESULT_GUIDANCE,
     "Replies are never announced back: a waited send returns the reply inline; timeoutSeconds:0 returns at admission and nothing wakes you later, so ask the target to sessions_send you its result.",
     "Omit mode to automatically continue your paused native child task; returns runId/taskRunId with task-owned completion instead of an inline wait or watch. With timeoutSeconds:0, your own running child is steered into its active run (admission only, no separate completion turn; use mode:followup for one); other sessions use ordinary message delivery. mode:notify queues ephemeral context for the next turn without waking or starting work (bounded process memory, not a durable inbox). mode:steer injects guidance into an active supported run and never starts idle work. mode:followup starts a separate turn without steering or resuming a paused task. mode:resume requires a paused native child task and rejects watch:true and positive timeoutSeconds.",

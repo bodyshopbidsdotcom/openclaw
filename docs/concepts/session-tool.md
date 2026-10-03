@@ -161,7 +161,7 @@ In Code Mode, the conversation tools reuse their exact Gateway output contracts.
 
 ## Sending cross-session messages
 
-`sessions_send` runs another session on the same Gateway and optionally waits for the response. Its `sessionKey`, `label`, or `agentId` selects local model context, not an external destination. A waited send returns the target's reply as the tool result; OpenClaw does not announce that reply into the requester session or the target's channel afterward, and nothing wakes the caller later. The target can still surface its own answer through its established delivery context. For exact external delivery, use a conversation tool or `message` with an explicit channel and target.
+`sessions_send` runs another session on the same Gateway and optionally waits for the response. Its `sessionKey`, `label`, or `agentId` selects local model context, not an external destination. A waited send returns the target's reply as the tool result; OpenClaw does not announce that reply into the requester session or the target's channel afterward, and nothing wakes the caller later. The target can still post its own answer to its conversation by calling `message`. For exact external delivery, use a conversation tool or `message` with an explicit channel and target.
 
 Sessions keep their addresses when execution moves between the Gateway, a paired device, and a cloud worker. An OpenClaw worker can send to an authorized parent, child, or sibling using its exact session key, including a target running on the Gateway. The Gateway validates the current session identities and normal visibility policy before admitting the target turn; target placement does not grant messaging access. Targets outside the configured visibility scope, archived targets, and replaced targets remain denied.
 
@@ -247,7 +247,7 @@ delivery records and does not resume these replies.
 
 A waited send that finishes without visible assistant text returns `status: "no_reply"`; no announcement remains pending. If the target delivered its final reply directly, the result says so and tells the caller not to resend. Otherwise, continue without waiting or send a new message if a response is required.
 
-Thread-scoped chat sessions, such as keys ending in `:thread:<id>`, are valid `sessions_send` targets. The target run receives the exact thread session key and runs on the internal channel with delivery disabled and the `message_tool_only` source-reply policy, so its final reply is not posted into the human-facing thread; the receiving agent must call `message` to post there. The later peer announcement step still delivers a non-skipped announcement to the target's route, which for a thread session is the thread itself; the target suppresses it by replying `ANNOUNCE_SKIP`.
+Thread-scoped chat sessions, such as keys ending in `:thread:<id>`, are valid `sessions_send` targets. The target run receives the exact thread session key and runs on the internal channel with delivery disabled and the `message_tool_only` source-reply policy, so its final reply is not posted into the human-facing thread; the receiving agent must call `message` to post there. No announcement step follows the run, so nothing reaches the thread unless the receiving agent calls `message`.
 
 Messages are marked as inter-session data in the receiving prompt (`[Inter-session message ... isUser=false]`) and in transcript provenance. The receiving agent should treat them as tool-routed data, not as a direct end-user-authored instruction.
 
