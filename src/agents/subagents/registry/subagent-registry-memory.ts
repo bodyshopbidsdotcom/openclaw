@@ -6,7 +6,6 @@
 import { isDeepStrictEqual } from "node:util";
 import type { captureOperatorToolGatewayContinuationContext } from "../../../gateway/server-plugin-in-process-dispatch.js";
 import { createDeferredCore } from "../../../shared/deferred.js";
-import { transferFollowupCohort } from "../completion/session-followup-cohort.js";
 import { SUBAGENT_ENDED_REASON_KILLED } from "./subagent-lifecycle-events.js";
 import { publishSubagentRunChanges } from "./subagent-registry-publication.js";
 import type { SubagentRunRecord } from "./subagent-registry.types.js";
@@ -233,7 +232,6 @@ class SubagentRunMap extends Map<string, SubagentRunRecord> {
 
   /** Same-task replacement stages custody before publication and can restore it on rollback. */
   transferCompletionAuthority(previous: SubagentRunRecord, next: SubagentRunRecord): () => void {
-    const restoreFollowup = transferFollowupCohort(previous, next);
     // Rejected tentative successors remain fenced, including after registration rollback.
     if (this.retiredCompletionEntries.has(previous)) {
       this.retiredCompletionEntries.add(next);
@@ -243,14 +241,13 @@ class SubagentRunMap extends Map<string, SubagentRunRecord> {
     }
     const custody = this.completionAuthorities.get(previous);
     if (!custody) {
-      return restoreFollowup;
+      return () => {};
     }
     this.completionAuthorities.delete(previous);
     custody.entry = next;
     this.completionAuthorities.set(next, custody);
     this.operatorCompletionEntries.add(next);
     return () => {
-      restoreFollowup();
       if (this.completionAuthorities.get(next) === custody) {
         this.completionAuthorities.delete(next);
         custody.entry = previous;

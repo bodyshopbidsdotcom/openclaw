@@ -9,10 +9,6 @@ import type { ChannelMessagingAdapter } from "../../channels/plugins/types.publi
 import { clearRuntimeConfigSnapshot, setRuntimeConfigSnapshot } from "../../config/io.js";
 import { retainLegacyDefaultAgentId } from "../../config/legacy.default-agent-owner.js";
 import { upsertSessionEntryCore } from "../../config/sessions/session-accessor.js";
-import {
-  getOwnedSessionTranscriptWriterFence,
-  withOwnedSessionTranscriptWrites,
-} from "../../config/sessions/transcript-write-context.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { GatewayClientRequestError } from "../../gateway/client.js";
 import { withTestDir } from "../../test-helpers/temp-dir.js";
@@ -86,7 +82,6 @@ type SessionsToolTestConfig = {
     scope: "per-sender";
     mainKey: string;
     dmScope?: "main" | "per-peer" | "per-channel-peer" | "per-account-channel-peer";
-    agentToAgent?: { maxPingPongTurns: number };
   };
   tools: {
     agentToAgent: { enabled: boolean };
@@ -107,9 +102,6 @@ vi.mock("../../config/config.js", async () => {
     getRuntimeConfig: () => loadConfigMock() as never,
   };
 });
-vi.mock("./sessions-send-tool.a2a.js", () => ({
-  runSessionsSendA2AFlow: vi.fn(),
-}));
 vi.mock("../../sessions/session-participant-recording.js", () => ({
   recordSessionParticipantBestEffort: (...args: unknown[]) => recordParticipantMock(...args),
 }));
@@ -235,7 +227,7 @@ function createMainSessionsSendTool() {
   });
 }
 
-async function executeFireAndForgetA2AFrom(
+async function executeFireAndForgetSendFrom(
   requesterSessionKey: string,
   options?: {
     mainKey?: string;
@@ -250,8 +242,7 @@ async function executeFireAndForgetA2AFrom(
   },
 ) {
   setActivePluginRegistry(createSessionConversationTestRegistry());
-  const { runSessionsSendA2AFlow } = await import("./sessions-send-tool.a2a.js");
-  vi.mocked(runSessionsSendA2AFlow).mockClear();
+  callGatewayMock.mockClear();
   const targetSessionKey = "agent:other:discord:group:ops";
   loadConfigMock.mockReturnValue({
     ...(options?.bindingDmScope ||
@@ -330,7 +321,11 @@ async function executeFireAndForgetA2AFrom(
     timeoutSeconds: 0,
   });
 
-  expect(requireDetails(result).status).toBe("accepted");
+  // A peer send returns at admission; nothing observes the target run afterward.
+  expect(requireDetails(result)).toMatchObject({
+    status: "accepted",
+    delivery: { status: "skipped", mode: "announce" },
+  });
   expect(recordParticipantMock).toHaveBeenCalledWith(
     expect.objectContaining({
       identity: { type: "agent", id: "main" },
@@ -338,11 +333,16 @@ async function executeFireAndForgetA2AFrom(
       sessionKey: targetSessionKey,
     }),
   );
-  const flowParams = vi.mocked(runSessionsSendA2AFlow).mock.calls[0]?.[0];
-  if (!flowParams) {
-    throw new Error("expected A2A flow");
+  expect(callGatewayMock.mock.calls.map(([request]) => request.method)).not.toContain("agent.wait");
+  const agentCall = callGatewayMock.mock.calls.find(([request]) => request.method === "agent");
+  const provenance = (
+    agentCall?.[0] as { params?: { inputProvenance?: { sourceSessionKey?: string } } } | undefined
+  )?.params?.inputProvenance;
+  if (!provenance) {
+    throw new Error("expected target turn provenance");
   }
-  return flowParams;
+  // The target sees this reply address and can send back to it explicitly.
+  return { requesterSessionKey: provenance.sourceSessionKey };
 }
 
 beforeEach(() => {
@@ -989,8 +989,6 @@ describe("sessions_send gating", () => {
       requesterSessionKey = MAIN_AGENT_SESSION_KEY,
     }) => {
       await withTestDir({ prefix: "openclaw-exact-session-send-" }, async (dir) => {
-        const { runSessionsSendA2AFlow } = await import("./sessions-send-tool.a2a.js");
-        vi.mocked(runSessionsSendA2AFlow).mockClear();
         const storePath = path.join(dir, "sessions.json");
         const targetSessionId = "child-incarnation";
         await upsertSessionEntryCore(
@@ -1047,7 +1045,6 @@ describe("sessions_send gating", () => {
           delivery: { status: "skipped", mode: "announce" },
           watched: false,
         });
-        expect(runSessionsSendA2AFlow).not.toHaveBeenCalled();
         expect(
           callGatewayMock.mock.calls.filter(([request]) => request.method === "agent.wait"),
         ).toHaveLength(timeoutSeconds);
@@ -1321,8 +1318,6 @@ describe("sessions_send gating", () => {
   it.each(["silent", "empty"] as const)(
     "reports a terminal %s target without leaving an announcement pending",
     async (disposition) => {
-      const { runSessionsSendA2AFlow } = await import("./sessions-send-tool.a2a.js");
-      vi.mocked(runSessionsSendA2AFlow).mockClear();
       const targetSessionKey = "agent:main:other";
       const tool = createSessionsSendTool({
         agentSessionKey: MAIN_AGENT_SESSION_KEY,
@@ -1380,15 +1375,12 @@ describe("sessions_send gating", () => {
       expect(details.delivery).toBeUndefined();
       expect(details.message).toContain("pending announcement");
       expect(details.sessionKey).toBe(targetSessionKey);
-      expect(runSessionsSendA2AFlow).not.toHaveBeenCalled();
     },
   );
 
   it.each([true, false])(
     "uses source delivery without reading history (visible text: %s)",
     async (hasText) => {
-      const { runSessionsSendA2AFlow } = await import("./sessions-send-tool.a2a.js");
-      vi.mocked(runSessionsSendA2AFlow).mockClear();
       const targetSessionKey = "agent:main:other";
       const tool = createSessionsSendTool({
         agentSessionKey: MAIN_AGENT_SESSION_KEY,
@@ -1447,12 +1439,7 @@ describe("sessions_send gating", () => {
           status: "ok",
           reply: "Already delivered to the source",
           sessionKey: targetSessionKey,
-        });
-        await vi.waitFor(() => expect(runSessionsSendA2AFlow).toHaveBeenCalledOnce());
-        expect(vi.mocked(runSessionsSendA2AFlow).mock.calls[0]?.[0]).toMatchObject({
-          roundOneReply: "Already delivered to the source",
-          sourceReplyDelivered: true,
-          targetSessionKey,
+          delivery: { status: "skipped", mode: "announce" },
         });
       } else {
         expect(requireDetails(result)).toMatchObject({
@@ -1460,110 +1447,36 @@ describe("sessions_send gating", () => {
           message:
             "The target delivered its final reply directly to its source conversation. Do not resend.",
         });
-        expect(runSessionsSendA2AFlow).not.toHaveBeenCalled();
       }
+      expect(callGatewayMock.mock.calls.some(([request]) => request.method === "send")).toBe(false);
       expect(
         callGatewayMock.mock.calls.some(([request]) => request.method === "chat.history"),
       ).toBe(false);
     },
   );
 
-  it("detaches fire-and-forget A2A work from parent transcript ownership", async () => {
-    const { runSessionsSendA2AFlow } = await import("./sessions-send-tool.a2a.js");
-    let inheritedFence: ReturnType<typeof getOwnedSessionTranscriptWriterFence>;
-    vi.mocked(runSessionsSendA2AFlow).mockImplementationOnce(async () => {
-      inheritedFence = getOwnedSessionTranscriptWriterFence();
-    });
-    let parentTranscriptWriteCalls = 0;
-    const parentTranscriptWrite = async <T>(run: () => Promise<T> | T): Promise<T> => {
-      parentTranscriptWriteCalls += 1;
-      return await run();
-    };
-
-    await withOwnedSessionTranscriptWrites(
-      {
-        sessionKey: MAIN_AGENT_SESSION_KEY,
-        sessionTarget: {
-          expectedWriterRunId: "disposed-parent-run",
-          sessionKey: MAIN_AGENT_SESSION_KEY,
-        },
-        withTranscriptWrite: parentTranscriptWrite,
-      },
-      async () => {
-        await executeFireAndForgetA2AFrom(MAIN_AGENT_SESSION_KEY);
-      },
-    );
-    await vi.waitFor(() => expect(runSessionsSendA2AFlow).toHaveBeenCalledOnce());
-
-    expect(inheritedFence).toBeUndefined();
-    expect(parentTranscriptWriteCalls).toBe(0);
-  });
-
-  it("canonicalizes aliased requester keys for same-session A2A delivery", async () => {
-    const { runSessionsSendA2AFlow } = await import("./sessions-send-tool.a2a.js");
-    vi.mocked(runSessionsSendA2AFlow).mockClear();
-    const tool = createSessionsSendTool({
-      agentSessionKey: "main",
-      agentChannel: MAIN_AGENT_CHANNEL,
-      config: {
-        session: { scope: "per-sender", mainKey: MAIN_AGENT_SESSION_KEY },
-        tools: { agentToAgent: { enabled: false } },
-      } as never,
-    });
-    callGatewayMock.mockImplementation(async (opts: unknown) => {
-      const request = opts as { method?: string };
-      if (request.method === "sessions.list") {
-        return {
-          path: "/tmp/sessions.json",
-          sessions: [{ key: MAIN_AGENT_SESSION_KEY, kind: "direct" }],
-        };
-      }
-      if (request.method === "agent") {
-        return { runId: "run-alias-fire-and-forget", acceptedAt: 123 };
-      }
-      return {};
-    });
-
-    const result = await tool.execute("call-aliased-fire-and-forget-same-session", {
-      sessionKey: MAIN_AGENT_SESSION_KEY,
-      message: "ping",
-      timeoutSeconds: 0,
-    });
-
-    const details = requireDetails(result);
-    expect(details.status).toBe("accepted");
-    expect(details.sessionKey).toBe("main");
-    const flowParams = vi.mocked(runSessionsSendA2AFlow).mock.calls[0]?.[0];
-    expect(flowParams?.requesterSessionKey).toBe(MAIN_AGENT_SESSION_KEY);
-    expect(flowParams?.targetSessionKey).toBe(MAIN_AGENT_SESSION_KEY);
-  });
-
   it.each([
     {
       label: "canonical cron run",
       requesterSessionKey: "agent:main:cron:job:run:abc",
-      expected: 0,
       expectedRequesterSessionKey: "agent:main:cron:job:run:abc",
     },
     {
       label: "normal requester",
       requesterSessionKey: "agent:main:telegram:direct:user",
-      expected: 5,
       expectedRequesterSessionKey: "agent:main:main",
     },
     {
       label: "non-canonical cron-like requester",
       requesterSessionKey: "agent:main:slack:cron:job:run:uuid",
-      expected: 5,
       expectedRequesterSessionKey: "agent:main:slack:cron:job:run:uuid",
     },
   ] as const)(
-    "uses the expected ping-pong turns for a $label",
-    async ({ requesterSessionKey, expected, expectedRequesterSessionKey }) => {
-      const flowParams = await executeFireAndForgetA2AFrom(requesterSessionKey);
+    "addresses the target turn to the expected requester for a $label",
+    async ({ requesterSessionKey, expectedRequesterSessionKey }) => {
+      const replyAddress = await executeFireAndForgetSendFrom(requesterSessionKey);
 
-      expect(flowParams.maxPingPongTurns).toBe(expected);
-      expect(flowParams.requesterSessionKey).toBe(expectedRequesterSessionKey);
+      expect(replyAddress.requesterSessionKey).toBe(expectedRequesterSessionKey);
     },
   );
 
@@ -1572,63 +1485,63 @@ describe("sessions_send gating", () => {
     { label: "channel", key: "agent:main:feishu:direct:peer-1" },
     { label: "account", key: "agent:main:feishu:default:direct:peer-1" },
   ] as const)("preserves a $label DM owned by another routed agent", async ({ key }) => {
-    const flowParams = await executeFireAndForgetA2AFrom(key, {
+    const replyAddress = await executeFireAndForgetSendFrom(key, {
       bindingAgentId: "stranger",
     });
 
-    expect(flowParams.requesterSessionKey).toBe(key);
+    expect(replyAddress.requesterSessionKey).toBe(key);
   });
 
   it("fails closed when an erased named account belongs to another agent", async () => {
     const key = "agent:main:feishu:direct:peer-1";
-    const flowParams = await executeFireAndForgetA2AFrom(key, {
+    const replyAddress = await executeFireAndForgetSendFrom(key, {
       bindingAgentId: "stranger",
       bindingAccountId: "work",
     });
 
-    expect(flowParams.requesterSessionKey).toBe(key);
+    expect(replyAddress.requesterSessionKey).toBe(key);
   });
 
   it("preserves a named-account route that inherits isolated global DM scope", async () => {
     const key = "agent:main:feishu:direct:peer-1";
-    const flowParams = await executeFireAndForgetA2AFrom(key, {
+    const replyAddress = await executeFireAndForgetSendFrom(key, {
       dmScope: "per-peer",
       defaultBindingDmScope: "main",
       bindingAccountId: "work",
     });
 
-    expect(flowParams.requesterSessionKey).toBe(key);
+    expect(replyAddress.requesterSessionKey).toBe(key);
   });
 
   it("preserves account-isolated bindings with trimmed wildcard peers", async () => {
     const key = "agent:main:feishu:direct:peer-1";
-    const flowParams = await executeFireAndForgetA2AFrom(key, {
+    const replyAddress = await executeFireAndForgetSendFrom(key, {
       bindingDmScope: "per-peer",
       bindingAccountId: "work",
       bindingPeerId: " * ",
     });
 
-    expect(flowParams.requesterSessionKey).toBe(key);
+    expect(replyAddress.requesterSessionKey).toBe(key);
   });
 
   it("preserves isolated peers when the session key loses binding casing", async () => {
     const key = "agent:main:feishu:direct:peer-1";
-    const flowParams = await executeFireAndForgetA2AFrom(key, {
+    const replyAddress = await executeFireAndForgetSendFrom(key, {
       bindingDmScope: "per-peer",
       bindingPeerId: "PEER-1",
     });
 
-    expect(flowParams.requesterSessionKey).toBe(key);
+    expect(replyAddress.requesterSessionKey).toBe(key);
   });
 
   it("preserves isolated bindings whose team is absent from the session key", async () => {
     const key = "agent:main:feishu:direct:peer-1";
-    const flowParams = await executeFireAndForgetA2AFrom(key, {
+    const replyAddress = await executeFireAndForgetSendFrom(key, {
       bindingDmScope: "per-peer",
       bindingTeamId: "T123",
     });
 
-    expect(flowParams.requesterSessionKey).toBe(key);
+    expect(replyAddress.requesterSessionKey).toBe(key);
   });
 
   it.each([
@@ -1638,9 +1551,9 @@ describe("sessions_send gating", () => {
   ] as const)(
     "routes a legacy $label requester back to its monitored main session",
     async ({ key }) => {
-      const flowParams = await executeFireAndForgetA2AFrom(key);
+      const replyAddress = await executeFireAndForgetSendFrom(key);
 
-      expect(flowParams.requesterSessionKey).toBe(MAIN_AGENT_SESSION_KEY);
+      expect(replyAddress.requesterSessionKey).toBe(MAIN_AGENT_SESSION_KEY);
       const agentCall = callGatewayMock.mock.calls.find(
         ([request]) => (request as { method?: string }).method === "agent",
       );
@@ -1658,11 +1571,11 @@ describe("sessions_send gating", () => {
   );
 
   it("routes a legacy direct requester to its configured main session key", async () => {
-    const flowParams = await executeFireAndForgetA2AFrom("agent:main:feishu:direct:peer-1", {
+    const replyAddress = await executeFireAndForgetSendFrom("agent:main:feishu:direct:peer-1", {
       mainKey: "work",
     });
 
-    expect(flowParams.requesterSessionKey).toBe("agent:main:work");
+    expect(replyAddress.requesterSessionKey).toBe("agent:main:work");
   });
 
   it.each([
@@ -1677,9 +1590,9 @@ describe("sessions_send gating", () => {
       key: "agent:main:feishu:default:dm:peer-1:thread:reply-root",
     },
   ] as const)("preserves the exact $label requester under main DM scope", async ({ key }) => {
-    const flowParams = await executeFireAndForgetA2AFrom(key);
+    const replyAddress = await executeFireAndForgetSendFrom(key);
 
-    expect(flowParams.requesterSessionKey).toBe(key);
+    expect(replyAddress.requesterSessionKey).toBe(key);
   });
 
   it.each([
@@ -1687,11 +1600,11 @@ describe("sessions_send gating", () => {
     { label: "channel", key: "agent:main:slack:channel:peer-1" },
     { label: "threaded DM", key: "agent:main:feishu:direct:peer-2:thread:reply-root" },
   ])("preserves a peer-only $label requester without an account owner", async ({ key }) => {
-    const flowParams = await executeFireAndForgetA2AFrom(key, {
+    const replyAddress = await executeFireAndForgetSendFrom(key, {
       routingConfig: PEER_ONLY_ROUTING_CONFIG,
     });
 
-    expect(flowParams.requesterSessionKey).toBe(key);
+    expect(replyAddress.requesterSessionKey).toBe(key);
     expect(callGatewayMock).toHaveBeenCalledWith(
       expect.objectContaining({
         method: "agent",
@@ -1711,9 +1624,9 @@ describe("sessions_send gating", () => {
       key: "agent:main:feishu:default:direct:peer-1",
     },
   ] as const)("preserves privacy under $dmScope for $key", async ({ dmScope, key }) => {
-    const flowParams = await executeFireAndForgetA2AFrom(key, { dmScope });
+    const replyAddress = await executeFireAndForgetSendFrom(key, { dmScope });
 
-    expect(flowParams.requesterSessionKey).toBe(key);
+    expect(replyAddress.requesterSessionKey).toBe(key);
   });
 
   it.each([
@@ -1726,9 +1639,9 @@ describe("sessions_send gating", () => {
   ] as const)(
     "preserves a binding-isolated $bindingDmScope DM under global main scope",
     async ({ bindingDmScope, key }) => {
-      const flowParams = await executeFireAndForgetA2AFrom(key, { bindingDmScope });
+      const replyAddress = await executeFireAndForgetSendFrom(key, { bindingDmScope });
 
-      expect(flowParams.requesterSessionKey).toBe(key);
+      expect(replyAddress.requesterSessionKey).toBe(key);
     },
   );
 
@@ -1742,12 +1655,12 @@ describe("sessions_send gating", () => {
   ] as const)(
     "honors a main-scope binding overriding global $dmScope",
     async ({ dmScope, key }) => {
-      const flowParams = await executeFireAndForgetA2AFrom(key, {
+      const replyAddress = await executeFireAndForgetSendFrom(key, {
         dmScope,
         bindingDmScope: "main",
       });
 
-      expect(flowParams.requesterSessionKey).toBe(MAIN_AGENT_SESSION_KEY);
+      expect(replyAddress.requesterSessionKey).toBe(MAIN_AGENT_SESSION_KEY);
     },
   );
 
@@ -1757,12 +1670,12 @@ describe("sessions_send gating", () => {
   ] as const)(
     "fails closed for an account-erased $bindingDmScope DM binding",
     async ({ bindingDmScope, key }) => {
-      const flowParams = await executeFireAndForgetA2AFrom(key, {
+      const replyAddress = await executeFireAndForgetSendFrom(key, {
         bindingDmScope,
         bindingAccountId: "work",
       });
 
-      expect(flowParams.requesterSessionKey).toBe(key);
+      expect(replyAddress.requesterSessionKey).toBe(key);
     },
   );
 

@@ -4,7 +4,6 @@ import { runQaGatewayFixture } from "../../test/helpers/qa-gateway-cleanup.js";
 import { upsertSessionEntryCore } from "../config/sessions/session-accessor.sqlite-entry.js";
 import * as gatewayWorkAdmission from "../process/gateway-work-admission.js";
 import { runWithGatewayRootWorkAdmissionForTest } from "../process/gateway-work-admission.test-helpers.js";
-import { isCompletionReportInputProvenance } from "../sessions/input-provenance.js";
 import * as asyncWork from "../shared/async-work-scope.js";
 import {
   createToolSearchCatalogRef,
@@ -12,7 +11,6 @@ import {
 } from "./tool-search-catalog.js";
 import { resolveToolSearchConfig } from "./tool-search-config.js";
 import { ToolSearchRuntime } from "./tool-search-runtime.js";
-import { testing as agentStepTesting } from "./tools/agent-step.test-support.js";
 import type { AnyAgentTool } from "./tools/common.js";
 
 type SessionsSendTimeoutFixtures = {
@@ -41,10 +39,10 @@ export function observeSessionSendContinuations(options: { trackAllWork?: boolea
     .spyOn(gatewayWorkAdmission, "runWithGatewayDetachedWorkContinuation")
     .mockImplementation(function observe<T>(run: () => Promise<T>, origin?: string): Promise<T> {
       const completion = original(
-        origin === "session:a2a-send" ? () => continuationWork.run(true, run) : run,
+        origin === "session:self-reply" ? () => continuationWork.run(true, run) : run,
         origin,
       );
-      if (origin === "session:a2a-send") {
+      if (origin === "session:self-reply") {
         completions.add(completion);
       }
       return completion;
@@ -115,7 +113,7 @@ export function registerSessionsSendTimeoutTests({
       expectedError: "agent run timed out",
     },
   ] as const)(
-    "sessions_send preserves a $name through Tool Search without starting A2A",
+    "sessions_send preserves a $name through Tool Search without a reply-back",
     async ({ waitResult, expectedError }) => {
       const calls: Array<{ method?: string; params?: unknown }> = [];
       const requesterKey = "agent:main:main";
@@ -166,39 +164,29 @@ export function registerSessionsSendTimeoutTests({
 export function registerSessionsSendLateReplyTests({
   getSessionTool,
   callGatewayMock,
-  settleContinuations,
-}: SessionsSendTimeoutFixtures & { settleContinuations: () => Promise<void> }) {
+}: SessionsSendTimeoutFixtures) {
   it.each<{
     targetKind: string;
     targetKey: string;
     spawned: boolean;
     timeoutSeconds?: number;
     pendingError?: boolean;
-    failure?: string;
-    stopReason?: string;
     cronRequester?: boolean;
   }>([
     { targetKind: "peer", targetKey: "agent:director1:main", spawned: false },
+    {
+      targetKind: "nonblocking peer",
+      targetKey: "agent:director1:main",
+      spawned: false,
+      timeoutSeconds: 0,
+    },
     {
       targetKind: "retrying child",
       targetKey: "agent:director1:subagent:child",
       spawned: true,
       pendingError: true,
     },
-    {
-      targetKind: "failed retrying child",
-      targetKey: "agent:director1:subagent:child",
-      spawned: true,
-      pendingError: true,
-      failure: "child retry exhausted",
-    },
-    {
-      targetKind: "cancelled child",
-      targetKey: "agent:director1:subagent:child",
-      spawned: true,
-      failure: "child run cancelled",
-      stopReason: "aborted",
-    },
+    { targetKind: "waited child", targetKey: "agent:director1:subagent:child", spawned: true },
     {
       targetKind: "nonblocking child of Cron",
       targetKey: "agent:director1:dashboard:child",
@@ -206,24 +194,9 @@ export function registerSessionsSendLateReplyTests({
       cronRequester: true,
       timeoutSeconds: 0,
     },
-    {
-      targetKind: "failed waited child of Cron",
-      targetKey: "agent:director1:subagent:child",
-      spawned: true,
-      cronRequester: true,
-      failure: "Cron child run failed",
-    },
   ])(
-    "sessions_send delivers the late reply from a $targetKind after the parent root releases",
-    async ({
-      targetKey,
-      spawned,
-      timeoutSeconds = 1,
-      pendingError,
-      failure,
-      stopReason,
-      cronRequester = false,
-    }) => {
+    "sessions_send leaves the late reply from a $targetKind in its session without waking the caller",
+    async ({ targetKey, spawned, timeoutSeconds = 1, pendingError, cronRequester = false }) => {
       const calls: Array<{ method?: string; params?: unknown }> = [];
       const requesterKey = cronRequester ? "agent:main:cron:job:run:once" : "agent:main:main";
       if (spawned) {
@@ -232,79 +205,21 @@ export function registerSessionsSendLateReplyTests({
           { sessionId: "child-session", updatedAt: 1, spawnedBy: requesterKey, spawnDepth: 1 },
         );
       }
-      let targetWaitCount = 0;
-      let releaseDelayedWait = () => {};
-      const delayedWaitGate = new Promise<void>((resolve) => {
-        releaseDelayedWait = resolve;
-      });
-      let requesterProviderStarts = 0;
-      let requesterAdmissionClosed: boolean | undefined;
-      let finalAnnounceProviderStarts = 0;
-      let finalAnnounceAdmissionClosed: boolean | undefined;
       callGatewayMock.mockImplementation(async (opts: unknown) => {
         const request = opts as { method?: string; params?: unknown };
         calls.push(request);
         if (request.method === "agent") {
-          const params = request.params as { sessionKey?: string } | undefined;
-          if (params?.sessionKey === targetKey) {
-            return { runId: "run-target", status: "accepted", acceptedAt: 2000 };
-          }
-          if (params?.sessionKey === requesterKey) {
-            requesterAdmissionClosed =
-              gatewayWorkAdmission.isGatewaySubordinateWorkAdmissionClosed();
-            if (requesterAdmissionClosed) {
-              throw new gatewayWorkAdmission.GatewayDrainingError();
-            }
-            requesterProviderStarts += 1;
-            return { runId: "run-requester", status: "accepted", acceptedAt: 2001 };
-          }
+          return { runId: "run-target", status: "accepted", acceptedAt: 2000 };
         }
         if (request.method === "agent.wait") {
-          const params = request.params as { runId?: string } | undefined;
-          if (params?.runId === "run-target") {
-            targetWaitCount += 1;
-            if (timeoutSeconds !== 0 && targetWaitCount === 1) {
-              return {
-                runId: "run-target",
-                status: "timeout",
-                ...(pendingError ? { pendingError: true, error: "retrying provider" } : {}),
-              };
-            }
-            await delayedWaitGate;
-            if (failure) {
-              return { runId: "run-target", status: "error", error: failure, stopReason };
-            }
-            return {
-              runId: "run-target",
-              status: "ok",
-              terminalReply: { disposition: "visible", text: "late director reply" },
-            };
-          }
-          if (params?.runId === "run-requester") {
-            return {
-              runId: "run-requester",
-              status: "ok",
-              terminalReply: { disposition: "visible", text: "requester saw director" },
-            };
-          }
+          // The caller's own wait expires before the target finishes.
+          return {
+            runId: "run-target",
+            status: "timeout",
+            ...(pendingError ? { pendingError: true, error: "retrying provider" } : {}),
+          };
         }
         return {};
-      });
-      await agentStepTesting.setDepsForTest({
-        agentCommandFromIngress: async (opts) => {
-          expect(opts.sessionKey).toBe(targetKey);
-          expect(opts.extraSystemPrompt).toContain("Agent-to-agent announce step");
-          finalAnnounceAdmissionClosed =
-            gatewayWorkAdmission.isGatewaySubordinateWorkAdmissionClosed();
-          if (finalAnnounceAdmissionClosed) {
-            throw new gatewayWorkAdmission.GatewayDrainingError();
-          }
-          finalAnnounceProviderStarts += 1;
-          return {
-            payloads: [{ text: "ANNOUNCE_SKIP", mediaUrl: null }],
-            meta: { durationMs: 1 },
-          };
-        },
       });
 
       const tool = getSessionTool("sessions_send", {
@@ -334,64 +249,19 @@ export function registerSessionsSendLateReplyTests({
           status: pendingError ? "timeout" : "accepted",
           sessionKey: targetKey,
           ...(!pendingError ? { targetDisposition: "queued" } : {}),
-          delivery: { status: "pending", mode: "announce" },
+          delivery: { status: "skipped", mode: "announce" },
         });
-        expect(gatewayWorkAdmission.getActiveGatewayRootWorkCount()).toBe(1);
-        expect(requesterProviderStarts).toBe(0);
-        releaseDelayedWait();
-
-        if (!cronRequester) {
-          await vi.waitFor(
-            () => {
-              expect(requesterAdmissionClosed).toBe(false);
-            },
-            { timeout: 2_000, interval: 5 },
-          );
-        }
-        await settleContinuations();
-        await vi.waitFor(() => {
-          expect(gatewayWorkAdmission.getActiveGatewayRootWorkCount()).toBe(0);
-        });
-        expect(requesterProviderStarts).toBe(cronRequester ? 0 : spawned ? 1 : 3);
-
-        const requesterReplyCall = calls.find(
-          (call) =>
-            call.method === "agent" &&
-            (call.params as { sessionKey?: string } | undefined)?.sessionKey === requesterKey,
+        // Nothing keeps observing the accepted run once the tool returns, so the
+        // target's late reply has no path back into the caller or a channel.
+        expect(gatewayWorkAdmission.getActiveGatewayRootWorkCount()).toBe(0);
+        expect(calls.filter((call) => call.method === "agent.wait")).toHaveLength(
+          timeoutSeconds === 0 ? 0 : 1,
         );
-        if (cronRequester) {
-          expect(requesterReplyCall).toBeUndefined();
-          expect(requesterAdmissionClosed).toBeUndefined();
-          expect(calls.filter((call) => call.method === "agent")).toHaveLength(1);
-        } else {
-          const replyParams = requesterReplyCall?.params as
-            | {
-                extraSystemPrompt?: string;
-                inputProvenance?: { sourceSessionKey?: string; sourceRole?: string };
-                message?: string;
-                sessionKey?: string;
-              }
-            | undefined;
-          expect(replyParams?.sessionKey).toBe(requesterKey);
-          expect(replyParams?.inputProvenance?.sourceSessionKey).toBe(targetKey);
-          expect(replyParams?.message).toContain(failure ?? "late director reply");
-          expect(replyParams?.inputProvenance?.sourceRole).toBe(spawned ? "subagent" : undefined);
-          expect(
-            isCompletionReportInputProvenance(replyParams?.inputProvenance),
-            "requested child results use the completion boundary so parent answers remain visible",
-          ).toBe(spawned);
-          if (spawned) {
-            expect(replyParams?.extraSystemPrompt).not.toContain("REPLY_SKIP");
-          } else {
-            expect(replyParams?.extraSystemPrompt).toContain("Agent-to-agent reply step");
-            expect(replyParams?.extraSystemPrompt).toContain("Current agent: Agent 1 (requester)");
-          }
-        }
+        expect(calls.filter((call) => call.method === "agent")).toEqual([
+          expect.objectContaining({ params: expect.objectContaining({ sessionKey: targetKey }) }),
+        ]);
         expect(calls.find((call) => call.method === "send")).toBeUndefined();
-        const announces = !spawned || (cronRequester && !failure);
-        expect(finalAnnounceAdmissionClosed).toBe(announces ? false : undefined);
-        expect(finalAnnounceProviderStarts).toBe(announces ? 1 : 0);
-      }, releaseDelayedWait);
+      });
     },
   );
 }

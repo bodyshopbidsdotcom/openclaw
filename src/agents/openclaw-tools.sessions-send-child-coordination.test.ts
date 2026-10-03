@@ -97,7 +97,6 @@ import {
 } from "../test-utils/openclaw-test-state.js";
 import { createSessionConversationTestRegistry } from "../test-utils/session-conversation-registry.js";
 import { observeSessionSendContinuations } from "./openclaw-tools.sessions-timeout.test-support.js";
-import { testing as agentStepTesting } from "./tools/agent-step.test-support.js";
 import { createSessionsSendTool } from "./tools/sessions-send-tool.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
@@ -118,10 +117,6 @@ type AgentCallParams = {
   inputProvenance?: { sourceSessionKey?: string; sourceRole?: string };
 };
 const calls: GatewayCall[] = [];
-const finalAnnounce = vi.fn(async () => ({
-  payloads: [{ text: "ANNOUNCE_SKIP", mediaUrl: null }],
-  meta: { durationMs: 1 },
-}));
 function mockGatewayReply(
   waitResult: Record<string, unknown> = {
     status: "ok",
@@ -155,13 +150,15 @@ function expectCoordination(
   child: boolean,
   requesterChild: boolean,
 ) {
+  // Children and peers alike answer inline; neither side gets a reply-back turn.
   expect.soft(result.details).toMatchObject({
     status: "ok",
     reply: "Requested result",
-    delivery: { status: child ? "skipped" : "pending" },
+    delivery: { status: "skipped", mode: "announce" },
   });
   const agentCalls = calls.filter((call) => call.method === "agent");
-  expect.soft(agentCalls).toHaveLength(child ? 1 : 6);
+  expect.soft(agentCalls).toHaveLength(1);
+  expect.soft(calls.some((call) => call.method === "send")).toBe(false);
   expect
     .soft(agentParams(agentCalls[0] ?? {}).inputProvenance?.sourceRole)
     .toBe(requesterChild ? "subagent" : undefined);
@@ -196,18 +193,15 @@ describe("sessions_send child coordination", () => {
     callGatewayMock.mockReset();
     calls.length = 0;
     mockGatewayReply();
-    finalAnnounce.mockClear();
     readAcpSessionMetaMock.mockReset().mockReturnValue(undefined);
     readAcpSessionMetaForEntryMock
       .mockReset()
       .mockImplementation((params: unknown) => readAcpSessionMetaMock(params));
     setActivePluginRegistry(createSessionConversationTestRegistry());
-    await agentStepTesting.setDepsForTest({ agentCommandFromIngress: finalAnnounce });
   });
   afterEach(async () => {
     await settleSessionWork();
     resetGatewayWorkAdmission();
-    await agentStepTesting.setDepsForTest();
     closeOpenClawStateDatabaseForTest();
     await state.cleanup();
   });
@@ -249,10 +243,7 @@ describe("sessions_send child coordination", () => {
       await settleSessionWork();
       const agentCalls = expectCoordination(result, child, direction === "requester" && child);
       if (child) {
-        expect(result.details).toMatchObject({ delivery: { mode: "announce" } });
         expect(agentParams(agentCalls[0] ?? {}).extraSystemPrompt).toBeUndefined();
-        expect(finalAnnounce).not.toHaveBeenCalled();
-        expect(calls.some((call) => call.method === "send")).toBe(false);
       }
       if (direction === "target") {
         await runOpenClawAgentWriteAdmission(

@@ -6,7 +6,6 @@ export type SessionsSendToolOptions = {
   agentId?: string;
   agentSessionKey?: string;
   agentSessionId?: string;
-  requesterTurnRunId?: string;
   agentChannel?: string;
   requesterOrigin?: DeliveryContext;
   sandboxed?: boolean;

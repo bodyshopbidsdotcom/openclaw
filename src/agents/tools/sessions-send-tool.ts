@@ -1,5 +1,4 @@
 import crypto from "node:crypto";
-import { isRequesterParentOfBackgroundAcpSession } from "@openclaw/acp-core/session-interaction-mode";
 import { finiteSecondsToTimerSafeMilliseconds } from "@openclaw/normalization-core/number-coercion";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { readAcpSessionMetaForEntry } from "../../acp/runtime/session-meta-readonly.js";
@@ -35,7 +34,6 @@ import {
 import { annotateInterSessionPromptText } from "../../sessions/input-provenance.js";
 import { deriveSessionChatTypeFromKey } from "../../sessions/session-chat-type-shared.js";
 import {
-  isCronRunSessionKey,
   parseAgentSessionKey,
   parseSessionDeliveryRoute,
 } from "../../sessions/session-key-utils.js";
@@ -44,7 +42,6 @@ import { registerSessionStateWatch } from "../../sessions/session-state-events.j
 import { normalizeDeliveryContext } from "../../utils/delivery-context.shared.js";
 import { INTERNAL_MESSAGE_CHANNEL } from "../../utils/message-channel.js";
 import { listAgentIds, resolveSessionAgentId } from "../agent-scope.js";
-import { bindRequesterYieldCronAuthority } from "../cron-creator-authority-context.js";
 import { resolveNestedAgentLaneForSession } from "../lanes.js";
 import { isTerminalAgentWaitTimeout, waitForAgentRunReply } from "../run-wait.js";
 import { isSubagentSessionFromEntry } from "../subagents/spawn/subagent-depth-policy.js";
@@ -68,16 +65,13 @@ import {
   resolveSessionToolContext,
   resolveVisibleSessionReference,
 } from "./sessions-helpers.js";
-import {
-  prepareSessionsSendFollowup,
-  startSessionsSendFollowup,
-} from "./sessions-send-followup.js";
 import { buildAgentToAgentMessageContext } from "./sessions-send-helpers.js";
-import { startSessionsSendReplyFlow } from "./sessions-send-reply-flow.js";
 import { captureSessionsSendResumeCaller, resumeSessionsSendTask } from "./sessions-send-resume.js";
+import { startSessionsSendSelfReply } from "./sessions-send-self-reply.js";
 import { normalizeSessionsSendArguments } from "./sessions-send-tool.arguments.js";
 import {
   createConfiguredAgentMainSession,
+  startSessionsSendAgentRun,
   trySessionsSendActiveRunDelivery,
 } from "./sessions-send-tool.delivery.js";
 import { SessionsSendToolSchema, SessionsSendOutputSchema } from "./sessions-send-tool.schema.js";
@@ -137,7 +131,6 @@ function isConfiguredAgentMainSessionKey(params: {
 
 export function createSessionsSendTool(opts?: SessionsSendToolOptions): AnyAgentTool {
   const requesterOrigin = normalizeDeliveryContext(opts?.requesterOrigin);
-  const withRequesterAuthority = bindRequesterYieldCronAuthority(opts?.requesterTurnRunId);
   return {
     label: "Session Send",
     name: "sessions_send",
@@ -424,12 +417,6 @@ export function createSessionsSendTool(opts?: SessionsSendToolOptions): AnyAgent
         projection: "full",
       });
       const requesterSessionEntry = requesterSession.store[requesterSession.canonicalKey];
-      const requesterContinuationSession = opts?.agentSessionId
-        ? {
-            sessionId: opts.agentSessionId,
-            lifecycleRevision: requesterSessionEntry?.lifecycleRevision,
-          }
-        : undefined;
       const requesterDeliveryGeneration: SessionDeliveryGeneration | undefined =
         requesterSessionEntry?.sessionId
           ? {
@@ -556,7 +543,7 @@ export function createSessionsSendTool(opts?: SessionsSendToolOptions): AnyAgent
         finiteSecondsToTimerSafeMilliseconds(timeoutSeconds, {
           floorSeconds: true,
         }) ?? 0;
-      const announceTimeoutMs = timeoutSeconds === 0 ? 30_000 : timeoutMs;
+      const deliveryTimeoutMs = timeoutSeconds === 0 ? 30_000 : timeoutMs;
       const idempotencyKey = opts?.idempotencyKey ?? crypto.randomUUID();
       let runId: string = idempotencyKey;
       const sameSession = requesterSessionKey === resolvedKey && targetAgentId === requesterAgentId;
@@ -640,7 +627,6 @@ export function createSessionsSendTool(opts?: SessionsSendToolOptions): AnyAgent
           }
 
           const requesterChannel = opts?.agentChannel;
-          const isIsolatedCronRequester = isCronRunSessionKey(requesterSessionKey);
           const targetSession = resolveGatewaySessionStoreTargetWithStore({
             cfg,
             key: resolvedKey,
@@ -758,24 +744,8 @@ export function createSessionsSendTool(opts?: SessionsSendToolOptions): AnyAgent
               callGateway: gatewayCall,
             });
           }
-          // ACP background tasks already report to their parent through task completion.
-          const targetSessionEntryWithAcp = targetSessionEntry
-            ? { ...targetSessionEntry, acp: targetAcpMeta }
-            : targetSessionEntry;
-          const skipTaskReplyFlow = isRequesterParentOfBackgroundAcpSession(
-            targetSessionEntryWithAcp,
-            effectiveRequesterKey,
-          );
-          // Child reports, registered tasks, and exact-incarnation grants own their completion.
-          const replyMode =
-            requesterIsSubagent || skipTaskReplyFlow || expectedSessionId
-              ? undefined
-              : targetIsSubagent && !isIsolatedCronRequester
-                ? "one-way"
-                : "peer";
-
           const ownChild = targetSessionEntry?.spawnedBy === effectiveRequesterKey;
-          const startParams: Parameters<typeof startSessionsSendFollowup>[1] = {
+          const startParams: Parameters<typeof startSessionsSendAgentRun>[0] = {
             cfg,
             callGateway: gatewayCall,
             runId,
@@ -784,65 +754,34 @@ export function createSessionsSendTool(opts?: SessionsSendToolOptions): AnyAgent
             sourceOrigin: sameSession ? requesterOrigin : undefined,
             sessionKey: mode || ownChild ? resolvedKey : displayKey,
             sessionStoreTarget: targetSession,
-            deliveryTimeoutMs: announceTimeoutMs,
+            deliveryTimeoutMs,
             allowActiveRunQueueDelivery: timeoutSeconds === 0,
             expectedSessionId,
           };
           const activeDelivery = await trySessionsSendActiveRunDelivery(startParams, ownChild);
-          const followup =
-            !("ok" in activeDelivery) &&
-            replyMode === "one-way" &&
-            ownChild &&
-            // Key-only DM rerouting keeps its run-scoped contract, not new authority for another key.
-            replyRequesterSessionKey === effectiveRequesterKey &&
-            replyRequesterSessionKey
-              ? await prepareSessionsSendFollowup({
-                  withRequesterAuthority,
-                  requesterTurnRunId: opts?.requesterTurnRunId,
-                  runId,
-                  requesterAgentId,
-                  requesterSessionKey: replyRequesterSessionKey,
-                  targetAgentId,
-                  targetSessionKey: resolvedKey,
-                })
-              : undefined;
-          const replyContext: Parameters<typeof startSessionsSendFollowup>[2] = {
-            callGateway: gatewayCall,
-            targetSessionKey: resolvedKey,
-            targetAgentId,
-            displayKey,
-            message,
-            announceTimeoutMs,
-            maxPingPongTurns: isIsolatedCronRequester ? 0 : 5,
-            replyMode,
-            requesterSessionKey: replyRequesterSessionKey,
-            requesterAgentId,
-            requesterSession: requesterContinuationSession,
-            requesterDeliveryGeneration,
-            requesterOrigin,
-            requesterChannel,
-          };
-          const { start, completion } =
+          const start =
             "ok" in activeDelivery
-              ? { start: activeDelivery, completion: undefined }
-              : await startSessionsSendFollowup(
-                  followup,
-                  { ...startParams, ...activeDelivery },
-                  replyContext,
-                );
+              ? activeDelivery
+              : await startSessionsSendAgentRun({ ...startParams, ...activeDelivery });
           if (!start.ok) {
             return start.result;
           }
           const acceptedTargetSessionKey = start.a2aSessionKey ?? resolvedKey;
-          // Steering keeps its active owner; an inline child reply is already delivered.
-          const delayedDelivery = {
-            status: replyMode && start.targetDisposition === "queued" ? "pending" : "skipped",
+          // The target's answer stays in its own session: a waited send returns it
+          // inline, and nothing announces it into the requester or the target's
+          // channel later. A fire-and-forget self-send has no other session to wake,
+          // so its new turn routes its own answer to the conversation that asked.
+          // Child sessions and exact-incarnation grants keep their completion owners.
+          const deliversSelfReply =
+            sameSession &&
+            !start.a2aSessionKey &&
+            !requesterIsSubagent &&
+            !expectedSessionId &&
+            start.targetDisposition === "queued";
+          const delivery = {
+            status: deliversSelfReply ? "pending" : "skipped",
             mode: "announce",
           } as const;
-          const delivery =
-            timeoutSeconds > 0 && targetIsSubagent
-              ? ({ status: "skipped", mode: "announce" } as const)
-              : delayedDelivery;
           recordSessionToolActionFact({
             operation: "send",
             fact: "committed",
@@ -877,63 +816,48 @@ export function createSessionsSendTool(opts?: SessionsSendToolOptions): AnyAgent
           }
           runId = start.runId;
           const watchField = registerWatchIfRequested(acceptedTargetSessionKey);
-          const accepted = (acceptedDelivery: typeof delayedDelivery) =>
+          const accepted = () =>
             jsonResult({
               runId,
               status: "accepted",
               sessionKey: displayKey,
               targetDisposition: start.targetDisposition,
-              delivery: acceptedDelivery,
+              delivery,
               ...watchField,
             });
-          const startReplyFlow = ({
-            reply,
-            notifyRequesterOnWaitFailure = false,
-          }: {
-            reply?: Awaited<ReturnType<typeof waitForAgentRunReply>>;
-            notifyRequesterOnWaitFailure?: boolean;
-          }) =>
-            startSessionsSendReplyFlow({
-              ...replyContext,
-              runId,
-              completion,
-              reply,
-              skip: (reply ? delivery : delayedDelivery).status === "skipped",
-              targetSessionKey: acceptedTargetSessionKey,
-              displayKey: start.a2aSessionKey ?? displayKey,
-              notifyRequesterOnWaitFailure:
-                notifyRequesterOnWaitFailure && !isIsolatedCronRequester,
-            });
           if (timeoutSeconds === 0) {
-            startReplyFlow({ notifyRequesterOnWaitFailure: true });
-            return accepted(delivery);
+            if (deliversSelfReply) {
+              void startSessionsSendSelfReply({
+                callGateway: gatewayCall,
+                runId,
+                sessionKey: resolvedKey,
+                displayKey,
+                agentId: targetAgentId,
+                waitTimeoutMs: deliveryTimeoutMs,
+                requesterChannel,
+                requesterOrigin,
+                requesterDeliveryGeneration,
+              });
+            }
+            return accepted();
           }
 
-          const result = completion
-            ? await completion.take(timeoutMs)
-            : await waitForAgentRunReply({ runId, timeoutMs, callGateway: gatewayCall });
-          if (!result) {
-            startReplyFlow({ notifyRequesterOnWaitFailure: true });
-            return accepted(delayedDelivery);
-          }
-          completion?.close();
-
+          // A reply after this wait stays in the target session; nothing observes it.
+          const result = await waitForAgentRunReply({ runId, timeoutMs, callGateway: gatewayCall });
           if (result.status === "timeout") {
             if (result.pendingError === true && result.error?.trim()) {
-              startReplyFlow({ notifyRequesterOnWaitFailure: targetIsSubagent });
               return jsonResult({
                 runId,
                 status: "timeout",
                 error: result.error,
                 sentBeforeError: true,
                 sessionKey: displayKey,
-                delivery: delayedDelivery,
+                delivery,
                 ...watchField,
               });
             }
             if (!isTerminalAgentWaitTimeout(result)) {
-              startReplyFlow({ notifyRequesterOnWaitFailure: true });
-              return accepted(delayedDelivery);
+              return accepted();
             }
           }
           if (result.status === "timeout" || result.status === "error") {
@@ -957,9 +881,6 @@ export function createSessionsSendTool(opts?: SessionsSendToolOptions): AnyAgent
                   ? "The target delivered its final reply directly to its source conversation. Do not resend."
                   : NO_REPLY_MESSAGE,
               };
-          if (reply) {
-            startReplyFlow({ reply: result });
-          }
           return jsonResult({ runId, sessionKey: displayKey, ...response, ...watchField });
         },
       });

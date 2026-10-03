@@ -565,7 +565,6 @@ export function createOpenClawTools(options?: OpenClawToolsOptions): AnyAgentToo
           ),
           // Keep the in-process caller so materialized agent roots retain their creation stamp.
           createSessionsSendTool({
-            requesterTurnRunId: options?.runId,
             agentId: sessionAgentId,
             // Match sessions_spawn: spawned children record the durable run
             // session as spawnedBy, so the parent check must use the same key.

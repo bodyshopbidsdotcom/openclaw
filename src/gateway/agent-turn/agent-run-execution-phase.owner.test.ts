@@ -5,11 +5,8 @@ import {
   getPreparedModelRuntimeBorrowedSnapshot,
   getPreparedModelRuntimePluginGeneration,
 } from "../../agents/prepared-model-runtime-generation-scope.js";
-import { SessionFollowupCompletion } from "../../agents/subagents/completion/session-followup-completion.js";
 import type { SessionEntry } from "../../config/sessions.js";
-import { getAgentEventLifecycleGeneration } from "../../infra/agent-events.js";
 import { isWebchatClient } from "../../utils/message-channel.js";
-import type { ChatAbortControllerEntry } from "../chat-abort.js";
 import { readGatewayAccessRevision } from "../gateway-access-revision.js";
 import * as sessionChange from "../server-methods/session-change-event.js";
 import { replayAgentTurnIfCached } from "./agent-dedupe.js";
@@ -121,54 +118,6 @@ function createVisibleExecution() {
     finishPendingInput: vi.fn(),
   } as unknown as NonNullable<typeof execution.params.prepared.userTurn.recorder>;
   return execution;
-}
-
-function bindFollowupCompletion(execution: ReturnType<typeof createExecution>) {
-  const { params } = execution;
-  const sessionKey = "agent:main:followup-owner";
-  const lifecycleGeneration = getAgentEventLifecycleGeneration();
-  const entry: ChatAbortControllerEntry = {
-    controller: params.prepared.activeRunAbort.controller,
-    sessionId: "followup-session",
-    sessionKey,
-    operationalRunInstance: params.prepared.operationalRunInstance,
-    lifecycleGeneration,
-    startedAtMs: 1,
-    expiresAtMs: Number.MAX_SAFE_INTEGER,
-  };
-  params.resolvedSessionKey = sessionKey;
-  params.resolvedSessionId = entry.sessionId;
-  params.lifecycleGeneration = lifecycleGeneration;
-  params.context.chatAbortControllers = new Map([[params.runId, entry]]);
-  params.prepared.activeRunAbort = {
-    ...params.prepared.activeRunAbort,
-    registered: true,
-    entry,
-  };
-  params.prepared.activeGatewayWorkAdmission.isActive = () => true;
-  execution.abortCleanup.mockImplementation(() => {
-    if (params.context.chatAbortControllers.get(params.runId) === entry) {
-      params.context.chatAbortControllers.delete(params.runId);
-    }
-  });
-  const custody = new AbortController();
-  const owner = SessionFollowupCompletion.bind({
-    runId: params.runId,
-    requesterSessionKey: "agent:main:requester",
-    requesterSessionId: "requester-session",
-    requesterAgentId: "main",
-    targetAgentId: "main",
-    targetSessionKey: sessionKey,
-    custody: {
-      signal: custody.signal,
-      assertCurrent: () => custody.signal.throwIfAborted(),
-      run: (work) => work(),
-      release: () => custody.abort(),
-    },
-  });
-  owner.markAccepted(params.runId);
-  params.prepared.followupCompletion = owner;
-  return owner;
 }
 
 describe("startAgentRunExecution Gateway ownership", () => {
@@ -379,19 +328,9 @@ describe("startAgentRunExecution Gateway ownership", () => {
     expect(execution.callerRelease).toHaveBeenCalledOnce();
   });
 
-  it.each([
-    { ending: "aborted", registration: "current" },
-    { ending: "failed", registration: "current" },
-    { ending: "aborted", registration: "foreign" },
-    { ending: "aborted", registration: "absent" },
-    { ending: "aborted", registration: "replacement" },
-    { ending: "aborted", registration: "controller" },
-    { ending: "aborted", registration: "session" },
-    { ending: "aborted", registration: "instance" },
-    { ending: "aborted", registration: "lifecycle" },
-  ] as const)(
-    "settles an undispatched $ending followup only after cleanup (registration: $registration)",
-    async ({ ending, registration }) => {
+  it.each(["aborted", "failed"] as const)(
+    "releases an undispatched %s run only after cleanup",
+    async (ending) => {
       const execution = createExecution({
         aborted: ending === "aborted",
         ...(ending === "failed"
@@ -402,35 +341,6 @@ describe("startAgentRunExecution Gateway ownership", () => {
             }
           : {}),
       });
-      const owner = bindFollowupCompletion(execution);
-      const entry = execution.params.prepared.activeRunAbort.entry!;
-      const successor =
-        registration === "foreign" || registration === "replacement"
-          ? {
-              ...entry,
-              controller: new AbortController(),
-              sessionKey: registration === "foreign" ? "agent:main:unrelated" : entry.sessionKey,
-              operationalRunInstance: { runId: execution.params.runId, instanceId: "successor" },
-            }
-          : undefined;
-      if (successor) {
-        execution.params.context.chatAbortControllers.set(execution.params.runId, successor);
-      }
-      const lostRegistration = !["current", "foreign", "absent"].includes(registration);
-      execution.params.prepared.activeGatewayWorkAdmission.run = async (run) => {
-        if (registration === "absent") {
-          execution.params.context.chatAbortControllers.delete(execution.params.runId);
-        } else if (registration === "controller") {
-          entry.controller = new AbortController();
-        } else if (registration === "session") {
-          entry.sessionKey = "agent:main:unrelated";
-        } else if (registration === "instance") {
-          entry.operationalRunInstance = { runId: execution.params.runId, instanceId: "successor" };
-        } else if (registration === "lifecycle") {
-          entry.lifecycleGeneration = "successor-lifecycle";
-        }
-        return await run();
-      };
       const recoveryEntered = createDeferred();
       const releaseRecovery = createDeferred();
       const disposalEntered = createDeferred();
@@ -444,21 +354,12 @@ describe("startAgentRunExecution Gateway ownership", () => {
         disposalEntered.resolve();
         await finishDisposal.promise;
       });
-      const finishExecution = vi.spyOn(owner, "finishExecution");
-      const replyObserved = vi.fn();
-      const reply = owner.take().then((result) => {
-        replyObserved(result);
-        return result;
-      });
-      void reply.catch(() => {});
       const finished = vi.fn();
       const completion = startAgentRunExecution(execution.params).then(finished);
       try {
         await Promise.race([recoveryEntered.promise, completion]);
         expect(dispatchAgentRunFromGateway).not.toHaveBeenCalled();
         expect(execution.params.io.emitFinal).toHaveBeenCalledOnce();
-        expect(finishExecution).not.toHaveBeenCalled();
-        expect(replyObserved).not.toHaveBeenCalled();
         expect(execution.abortCleanup).not.toHaveBeenCalled();
         releaseRecovery.resolve();
         await Promise.race([disposalEntered.promise, completion]);
@@ -466,33 +367,15 @@ describe("startAgentRunExecution Gateway ownership", () => {
         expect(execution.gatewayRelease).toHaveBeenCalledOnce();
         expect(execution.runtimeRelease).toHaveBeenCalledOnce();
         expect(execution.callerRelease).not.toHaveBeenCalled();
-        expect(finishExecution).not.toHaveBeenCalled();
-        expect(replyObserved).not.toHaveBeenCalled();
         expect(finished).not.toHaveBeenCalled();
         finishDisposal.resolve();
         await completion;
         expect(finished).toHaveBeenCalledOnce();
         expect(execution.callerRelease).toHaveBeenCalledOnce();
-        expect(finishExecution).toHaveBeenCalledExactlyOnceWith(execution.params.runId);
-        if (successor) {
-          expect(execution.params.context.chatAbortControllers.get(execution.params.runId)).toBe(
-            successor,
-          );
-        }
-        if (lostRegistration) {
-          await expect(reply).rejects.toThrow("Follow-up admission was replaced before cleanup.");
-        } else {
-          await expect(reply).resolves.toMatchObject(
-            ending === "aborted"
-              ? { status: "error", stopReason: "rpc" }
-              : { status: "error", error: "Gateway owner retired" },
-          );
-        }
       } finally {
         releaseRecovery.resolve();
         finishDisposal.resolve();
         await completion.catch(() => {});
-        owner.close();
       }
     },
   );
