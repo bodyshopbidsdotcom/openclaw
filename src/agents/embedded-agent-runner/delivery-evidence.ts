@@ -49,6 +49,7 @@ export type AgentDeliveryEvidence = {
     error?: unknown;
     aborted?: unknown;
     finalAssistantVisibleText?: unknown;
+    finalAssistantRawText?: unknown;
     toolSummary?: {
       calls?: unknown;
     };

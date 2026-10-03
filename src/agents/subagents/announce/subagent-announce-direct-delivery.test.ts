@@ -412,6 +412,82 @@ describe("late exact requester recovery", () => {
     expect(fixture.send).not.toHaveBeenCalled();
   });
 
+  // Runtime shape of an explicit NO_REPLY: the terminal producer marks it silent-empty like
+  // an empty reply and may add the silent payload; only the raw final text records the token.
+  const silentFinal = { finalAssistantRawText: "NO_REPLY", terminalReplyKind: "silent-empty" };
+  const suppressedSilentDelivery = {
+    status: "suppressed",
+    succeeded: true,
+    reason: "no_visible_payload",
+    resultCount: 0,
+  };
+
+  it.each<{ name: string; tools: string[]; result?: object }>([
+    { name: "after sessions_send", tools: ["sessions_send"] },
+    { name: "after a message tool send elsewhere", tools: ["message"] },
+    { name: "without tool calls", tools: [] },
+    { name: "with the silent payload", tools: [], result: { payloads: [{ text: "NO_REPLY" }] } },
+    {
+      name: "after commentary progress",
+      tools: ["sessions_send"],
+      result: { payloads: [{ text: "Sending it over.", isCommentary: true }] },
+    },
+    {
+      name: "with suppressed automatic delivery",
+      tools: ["sessions_send"],
+      result: { payloads: [{ text: "NO_REPLY" }], deliveryStatus: suppressedSilentDelivery },
+    },
+  ])("settles a completed silent settle turn without replay ($name)", async ({ tools, result }) => {
+    const fixture = setup();
+    const delivery = fixture.startDelivery();
+    await fixture.dispatchEntered.promise;
+    // Release the recovery read so a misclassified turn fails instead of hanging.
+    fixture.readDone.resolve();
+    fixture.dispatchDone.resolve({
+      status: "ok",
+      result: { ...result, meta: { ...silentFinal, toolSummary: { calls: tools.length, tools } } },
+    });
+    const delivered = await delivery;
+    expect(delivered).toMatchObject({ delivered: true, path: "direct" });
+    expect(delivered.requesterVisibleFinalDelivered).toBeUndefined();
+    expect(fixture.read).not.toHaveBeenCalled();
+    expect(fixture.dispatch).toHaveBeenCalledOnce();
+    expect(fixture.send).not.toHaveBeenCalled();
+    expect(fixture.steer).not.toHaveBeenCalled();
+  });
+
+  it.each<{ name: string; status?: string; meta?: object; payloads?: unknown[] }>([
+    { name: "errored", meta: { ...silentFinal, error: { message: "provider failed" } } },
+    { name: "aborted", meta: { ...silentFinal, aborted: true } },
+    { name: "timed out", status: "timeout", meta: silentFinal },
+    { name: "non-exact silent", meta: { finalAssistantRawText: '{"action":"NO_REPLY"}' } },
+    { name: "mixed silent", meta: { finalAssistantRawText: "Done. NO_REPLY" } },
+    { name: "media silent", meta: silentFinal, payloads: [{ mediaUrl: "file:///tmp/a.png" }] },
+    { name: "empty", payloads: [] },
+    {
+      name: "empty-promoted silent",
+      payloads: [{ text: "NO_REPLY" }],
+      meta: { terminalReplyKind: "silent-empty" },
+    },
+  ])("keeps a $name settle turn retryable", async ({ status, meta, payloads }) => {
+    const fixture = setup();
+    const delivery = fixture.startDelivery();
+    await fixture.dispatchEntered.promise;
+    fixture.readDone.resolve();
+    fixture.dispatchDone.resolve({
+      status: status ?? "ok",
+      result: {
+        ...(payloads ? { payloads } : {}),
+        meta: { ...meta, toolSummary: { calls: 1, tools: ["sessions_send"] } },
+      },
+    });
+    const result = await delivery;
+    expect(result).toMatchObject({ delivered: false, reason: "visible_reply_missing" });
+    expect(result.disposition).toBeUndefined();
+    expect(fixture.send).not.toHaveBeenCalled();
+    expect(fixture.steer).not.toHaveBeenCalled();
+  });
+
   it.each(["private", "incognito", "ordinary announcement"] as const)(
     "does not add recovery reads to %s delivery",
     async (scope) => {

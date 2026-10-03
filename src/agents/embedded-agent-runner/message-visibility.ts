@@ -141,6 +141,24 @@ export function hasIntentionalSilentAgentPayload(result: { payloads?: unknown })
   });
 }
 
+/**
+ * Returns whether the raw final assistant text was exactly the silent token and no
+ * visible terminal payload remains. Payloads and `terminalReplyKind: "silent-empty"`
+ * look the same for an explicit token and an empty reply; only the raw text differs.
+ */
+export function hasExactSilentFinalReply(result: {
+  payloads?: unknown;
+  meta?: { finalAssistantRawText?: unknown };
+}): boolean {
+  return (
+    isSilentAgentReplyText(result.meta?.finalAssistantRawText) &&
+    !hasVisibleAgentPayload(result, {
+      includeSilentReplyPayloads: false,
+      requireTerminalContent: true,
+    })
+  );
+}
+
 /** Reads a transcript message role without trusting its boundary shape. */
 export function getTranscriptMessageRole(message: unknown): string | undefined {
   const role = asOptionalObjectRecord(message)?.role;
