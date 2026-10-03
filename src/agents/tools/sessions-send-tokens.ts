@@ -1,9 +1,9 @@
 import { HEARTBEAT_TOKEN, isSilentReplyText, SILENT_REPLY_TOKEN } from "../../auto-reply/tokens.js";
 
 /** Suppresses a subagent completion announcement. */
-export const ANNOUNCE_SKIP_TOKEN = "ANNOUNCE_SKIP";
+const ANNOUNCE_SKIP_TOKEN = "ANNOUNCE_SKIP";
 /** Suppresses a direct reply delivery. */
-export const REPLY_SKIP_TOKEN = "REPLY_SKIP";
+const REPLY_SKIP_TOKEN = "REPLY_SKIP";
 
 const NON_DELIVERABLE_REPLY_TOKENS = [
   ANNOUNCE_SKIP_TOKEN,

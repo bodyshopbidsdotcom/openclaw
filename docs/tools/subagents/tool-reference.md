@@ -407,7 +407,8 @@ and older queued events can be evicted when the queue fills. Exact-incarnation
 access grants cannot enqueue notifications beyond their lifetime. Omitting
 `mode` preserves automatic routing. Its
 `targetDisposition` describes admission, while its `delivery.status` describes
-the later reply announcement. Neither proves completion. At the Gateway,
+the later reply announcement, which is `skipped` for every send to another
+session. Neither proves completion. At the Gateway,
 `chat.send` with `queueMode: "steer"` gives guidance at the supported runtime
 boundary; `queueMode: "interrupt"` replaces active execution. The deprecated
 `sessions.steer` RPC retains its documented interrupt behavior. An operator's

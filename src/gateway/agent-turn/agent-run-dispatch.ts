@@ -14,10 +14,6 @@ import {
 import { isTimeoutError } from "../../agents/failover-error.js";
 import type { MainSessionRecoveryPendingTarget } from "../../agents/main-session-recovery/main-session-recovery-store.js";
 import { runWithCanonicalSkillWorkspace } from "../../agents/skill-workshop-workspace-context.js";
-import type {
-  FollowupCompletionOwner,
-  FollowupReply,
-} from "../../agents/subagents/completion/session-followup-completion.types.js";
 import {
   readAgentRunTerminalError,
   readAgentRunTerminalOutcome,
@@ -33,7 +29,6 @@ import { setGatewayDedupeEntries } from "./agent-dedupe.js";
 import { captureAgentJobSession } from "./agent-job.js";
 import { createAgentRunDiagnostics } from "./agent-run-diagnostics.js";
 import { readAgentRunDispatchExecutionIdentity } from "./agent-run-dispatch-execution-identity.js";
-import { readFollowupTerminalReply } from "./agent-run-dispatch-followup.js";
 import {
   isGatewayAgentAbortRejection,
   projectRejectedGatewayStatus,
@@ -50,8 +45,6 @@ export function resolveAbortedAgentStopReason(entry?: ChatAbortControllerEntry):
 
 export function dispatchAgentRunFromGateway(params: {
   assertCurrent?: () => void;
-  assertSettlementCurrent?: () => void;
-  followupCompletion?: FollowupCompletionOwner;
   admittedRunEntry: ChatAbortControllerEntry | undefined;
   ingressOpts: Parameters<typeof agentCommandFromGatewayIngress>[0];
   runId: string;
@@ -81,7 +74,6 @@ export function dispatchAgentRunFromGateway(params: {
     params.isIncognito,
     params.context.logGateway,
   );
-  const assertSettlementCurrent = params.assertSettlementCurrent;
   const registeredRunEntry = params.admittedRunEntry;
   const jobSessionBinding = registeredRunEntry ?? params.ingressOpts;
   const registeredRunInstance = registeredRunEntry?.operationalRunInstance;
@@ -104,29 +96,6 @@ export function dispatchAgentRunFromGateway(params: {
     params.assertCurrent?.();
     params.abortController.signal.throwIfAborted();
   };
-  const followupCompletion = params.followupCompletion;
-  const settleFollowup = async (reply: FollowupReply) => {
-    if (!followupCompletion?.ownsExecution(params.runId)) {
-      return;
-    }
-    try {
-      await followupCompletion.settle(params.runId, reply, () => {
-        assertSettlementCurrent?.();
-        const current = params.context.chatAbortControllers.get(params.runId);
-        // Another session may reuse the run ID without adopting this retained result.
-        if (
-          !ownsRunRegistration() &&
-          (current === registeredRunEntry || current?.sessionKey === registeredSessionKey)
-        ) {
-          throw new Error("Followup physical execution lost its Gateway registration.");
-        }
-      });
-    } catch (error) {
-      followupCompletion.close(error);
-      throw error;
-    }
-  };
-
   const settle = async (outcome: {
     terminalOutcome: AgentRunTerminalOutcome;
     onRecovered?: () => void;
@@ -177,30 +146,17 @@ export function dispatchAgentRunFromGateway(params: {
   );
   const activateAgent = () => {
     assertCurrent();
-    const invoke = () =>
-      runWithCanonicalSkillWorkspace(params.canonicalSkillWorkspaceDir, () =>
-        agentCommandFromGatewayIngress(
-          cronCreatorAuthorityCapability
-            ? { ...ingressOptsWithSpawnFacts, cronCreatorAuthorityCapability }
-            : ingressOptsWithSpawnFacts,
-          diagnostics.runtime,
-          params.context.deps,
-          { restoreAdmittedRecovery: params.restoreAdmittedRecovery },
-          params.commandRuntimeContext,
-        ),
-      );
-    if (followupCompletion) {
-      if (
-        !registeredRunEntry ||
-        !ownsRunRegistration() ||
-        params.context.chatAbortControllers.get(params.runId) !== registeredRunEntry ||
-        registeredRunEntry.registrationCleanupRequested
-      ) {
-        throw new Error("Followup no longer owns its Gateway run registration.");
-      }
-      followupCompletion.assertExecutionCurrent(params.runId);
-    }
-    return invoke();
+    return runWithCanonicalSkillWorkspace(params.canonicalSkillWorkspaceDir, () =>
+      agentCommandFromGatewayIngress(
+        cronCreatorAuthorityCapability
+          ? { ...ingressOptsWithSpawnFacts, cronCreatorAuthorityCapability }
+          : ingressOptsWithSpawnFacts,
+        diagnostics.runtime,
+        params.context.deps,
+        { restoreAdmittedRecovery: params.restoreAdmittedRecovery },
+        params.commandRuntimeContext,
+      ),
+    );
   };
   const runAgent = () => {
     try {
@@ -267,12 +223,6 @@ export function dispatchAgentRunFromGateway(params: {
         RESOLVED_GATEWAY_STATUS_BY_TERMINAL_CLASSIFICATION[
           classifyAgentRunTerminalOutcome(terminalOutcome)
         ];
-      await settleFollowup({
-        ...terminalOutcome,
-        endedAt: terminalOutcome.endedAt ?? Date.now(),
-        yielded: result?.meta?.yielded === true,
-        ...readFollowupTerminalReply(params.runId, result?.meta),
-      });
       const payload = {
         runId: params.runId,
         status: responseStatus,
@@ -376,11 +326,6 @@ export function dispatchAgentRunFromGateway(params: {
         }
       }
       const responseStatus = projectRejectedGatewayStatus(terminalOutcome);
-      await settleFollowup({
-        ...terminalOutcome,
-        error: renderedErr,
-        endedAt: terminalOutcome.endedAt ?? Date.now(),
-      });
       Object.defineProperty(error, "cause", { value: cause });
       const payload = {
         runId: params.runId,
@@ -422,11 +367,7 @@ export function dispatchAgentRunFromGateway(params: {
       return { terminalOutcome, settled };
     })
     .finally(() => {
-      try {
-        cleanupRunOwner();
-      } finally {
-        followupCompletion?.finishExecution(params.runId);
-      }
+      cleanupRunOwner();
     });
 
   // Gateway shutdown must join this execution, not just its admission.

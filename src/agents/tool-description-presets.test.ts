@@ -80,7 +80,9 @@ describe("sessions_send tool description", () => {
     expect(describeSessionsSendTool()).toContain("on this Gateway");
     expect(describeSessionsSendTool()).toContain("not an external address");
     expect(describeSessionsSendTool()).not.toContain("conversations_");
-    expect(describeSessionsSendTool()).toContain("reply may still announce");
+    expect(describeSessionsSendTool()).toContain(
+      "Replies are never announced back: a waited send returns the reply inline; timeoutSeconds:0 returns at admission and nothing wakes you later, so ask the target to sessions_send you its result.",
+    );
     expect(describeSessionsSendTool()).toContain('`targetDisposition: "queued"` or `"steered"`');
     expect(describeSessionsSendTool()).toContain("neither proves target completion");
     expect(describeSessionsSendTool()).toContain(

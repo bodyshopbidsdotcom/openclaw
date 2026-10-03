@@ -18,10 +18,6 @@ import {
   normalizeMessageChannel,
 } from "../../../utils/message-channel.js";
 import { resolveSubagentRequesterAgentId } from "../../subagent-requester-owner.js";
-import {
-  getFollowupForCohort,
-  withFollowupSuccessor,
-} from "../completion/session-followup-completion.js";
 import { subagentRuns } from "../registry/subagent-registry-memory.js";
 import {
   matchesSubagentRequesterSession,
@@ -258,14 +254,11 @@ export async function maybeWakeRequesterAfterAllChildrenSettled(
   if (await retireReplacedStore()) {
     return false;
   }
-  const followup = getFollowupForCohort(settledBatch);
   const getRequesterRun = () =>
-    followup
-      ? undefined
-      : (getLatestLiveSubagentRunByChildSessionKey(
-          requesterSessionKey,
-          (entry) => entry.pauseReason === "sessions_yield",
-        ) ?? getLatestLiveSubagentRunByChildSessionKey(requesterSessionKey));
+    getLatestLiveSubagentRunByChildSessionKey(
+      requesterSessionKey,
+      (entry) => entry.pauseReason === "sessions_yield",
+    ) ?? getLatestLiveSubagentRunByChildSessionKey(requesterSessionKey);
   const requesterRun = getRequesterRun();
   const requesterGeneration = requesterRun?.generation;
   const requesterCreatedAt = requesterRun?.createdAt;
@@ -500,14 +493,6 @@ export async function maybeWakeRequesterAfterAllChildrenSettled(
       ) {
         return false;
       }
-      if (followup) {
-        try {
-          followup.assertCurrent();
-          return true;
-        } catch {
-          return false;
-        }
-      }
       const currentRequester = getRequesterRun();
       // Normal admission adopts a paused requester before execution starts.
       // Only this admitted continuation may replace its captured task owner.
@@ -577,63 +562,52 @@ export async function maybeWakeRequesterAfterAllChildrenSettled(
     }
     let delivery: Awaited<ReturnType<typeof deliverSubagentAnnouncement>>;
     try {
-      const dispatch = () =>
-        subagentRuns.runWithCompletionBatchAuthority(settledBatch, () =>
-          withRequesterCronAuthority(
-            {
+      delivery = await subagentRuns.runWithCompletionBatchAuthority(settledBatch, () =>
+        withRequesterCronAuthority(
+          {
+            requesterSessionKey,
+            requesterSessionId,
+            requesterAgentId,
+            batch: settledBatch,
+            rearmGeneration: state.requesterYieldBatch ? state.rearmGeneration : undefined,
+            runId: directIdempotencyKey,
+            isCurrent: isSourceSessionEffectsAllowed,
+          },
+          () =>
+            deliverSubagentAnnouncement({
               requesterSessionKey,
-              requesterSessionId,
               requesterAgentId,
-              batch: settledBatch,
-              rearmGeneration: state.requesterYieldBatch ? state.rearmGeneration : undefined,
-              runId: directIdempotencyKey,
-              isCurrent: isSourceSessionEffectsAllowed,
-            },
-            () =>
-              deliverSubagentAnnouncement({
-                requesterSessionKey,
-                requesterAgentId,
-                requesterRunTimeoutSeconds:
-                  requesterDepth >= 1 && requesterRun
-                    ? (requesterRun.runTimeoutSeconds ?? 0)
-                    : undefined,
-                triggerMessage: wakeMessage,
-                steerMessage: wakeMessage,
-                requesterSessionOrigin,
-                directOrigin,
-                sourceSessionKey: batchSessionKeys[0],
-                settleWakeSourceSessionKeys: batchSessionKeys,
-                sourceTool: "subagent_settle",
-                targetRequesterSessionKey: requesterSessionKey,
-                requesterIsSubagent: requesterDepth >= 1,
-                expectsCompletionMessage: false,
-                requireDirectDelivery: true,
-                ...(parentOnly
-                  ? {
-                      completionTarget: "parent",
-                      completionRequesterSessionId: requesterEntry.sessionId,
-                    }
-                  : {}),
-                ...(!parentOnly && requesterYieldedAfterDelivery
-                  ? { requireVisibleReply: true }
-                  : {}),
-                directIdempotencyKey,
-                signal: params.signal,
-                resolveGatewayContext,
-                isSourceSessionEffectsAllowed,
-              }),
-          ),
-        );
-      delivery = followup
-        ? await withFollowupSuccessor(
-            followup.successor(settledBatch, directIdempotencyKey, () => {
-              if (!isSourceSessionEffectsAllowed()) {
-                throw new Error("Followup completion cohort changed.");
-              }
+              requesterRunTimeoutSeconds:
+                requesterDepth >= 1 && requesterRun
+                  ? (requesterRun.runTimeoutSeconds ?? 0)
+                  : undefined,
+              triggerMessage: wakeMessage,
+              steerMessage: wakeMessage,
+              requesterSessionOrigin,
+              directOrigin,
+              sourceSessionKey: batchSessionKeys[0],
+              settleWakeSourceSessionKeys: batchSessionKeys,
+              sourceTool: "subagent_settle",
+              targetRequesterSessionKey: requesterSessionKey,
+              requesterIsSubagent: requesterDepth >= 1,
+              expectsCompletionMessage: false,
+              requireDirectDelivery: true,
+              ...(parentOnly
+                ? {
+                    completionTarget: "parent",
+                    completionRequesterSessionId: requesterEntry.sessionId,
+                  }
+                : {}),
+              ...(!parentOnly && requesterYieldedAfterDelivery
+                ? { requireVisibleReply: true }
+                : {}),
+              directIdempotencyKey,
+              signal: params.signal,
+              resolveGatewayContext,
+              isSourceSessionEffectsAllowed,
             }),
-            dispatch,
-          )
-        : await dispatch();
+        ),
+      );
     } catch (error) {
       if (await settleRevokedBatch()) {
         return false;

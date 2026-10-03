@@ -42,7 +42,6 @@ import { createOpenClawTools } from "../openclaw-tools.js";
 import { withGatewayToolCallerIdentity } from "./gateway-caller-context.js";
 import { createMessageTool } from "./message-tool-execution.js";
 import { sanitizeMessageToolVisiblePayload } from "./message-tool-visible-content.js";
-import { runSessionsSendA2AFlow } from "./sessions-send-tool.a2a.js";
 
 type CreateMessageTool = typeof createMessageTool;
 
@@ -704,30 +703,6 @@ describe("message tool gateway timeout", () => {
     const delivery = readEmbeddedMessageDeliveryFact(
       (result.details as { messageDelivery?: unknown }).messageDelivery,
     );
-    if (mode === "final") {
-      const visible = [marker];
-      const gateway = vi.fn();
-      gateway.mockImplementation(async (request) => {
-        if (request.method === "send") {
-          visible.push(request.params.message);
-        }
-        return {};
-      });
-      await runSessionsSendA2AFlow({
-        targetAgentId: "main",
-        callGateway: gateway,
-        targetSessionKey: sessionKey,
-        requesterSessionKey: sessionKey,
-        requesterChannel: "telegram",
-        displayKey: sessionKey,
-        message: "Reply to the source",
-        announceTimeoutMs: 10_000,
-        maxPingPongTurns: 0,
-        roundOneReply: marker,
-        sourceReplyDelivered: delivery?.sourceReplyDelivered,
-      });
-      expect(visible).toEqual([marker]);
-    }
     expect(delivery?.sourceReplyDelivered).toBe(mode === "final" ? true : undefined);
   });
 

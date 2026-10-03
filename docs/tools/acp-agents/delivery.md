@@ -56,29 +56,18 @@ work. The delivery path depends on that shape.
 
   </Accordion>
   <Accordion title="sessions_send and A2A delivery">
-    `sessions_send` can target another session after spawn. For normal peer
-    sessions, OpenClaw uses an agent-to-agent (A2A) follow-up path after
-    injecting the message:
+    `sessions_send` can target another session after spawn. It injects the
+    message and, when the caller waits, returns the target's reply inline as
+    the tool result. OpenClaw runs no agent-to-agent follow-up afterward: no
+    reply-back exchange, no announce step, and nothing wakes the caller later.
+    A target that needs to report back calls `sessions_send` itself.
 
-    - Wait for the target session's reply.
-    - Optionally let requester and target exchange a bounded number of follow-up turns.
-    - Ask the target to produce an announce message.
-    - Deliver that announce to the visible channel or thread.
-
-    That A2A path is a fallback for peer sends where the sender needs a
-    visible follow-up. It stays enabled when an unrelated session can see and
-    message an ACP target, for example under broad `tools.sessions.visibility`
-    settings.
-
-    OpenClaw skips the A2A follow-up only when the requester is the parent of
-    its own parent-owned one-shot ACP child. In that case, running A2A on top
-    of task completion can wake the parent with the child's result, forward
-    the parent's reply back into the child, and create a parent/child echo
-    loop. Accepted `sessions_send` results report target admission separately
-    from announcement delivery: `targetDisposition` is `queued` or `steered`,
-    while `delivery.status` is `pending` or `skipped`. For this owned-child case,
-    `delivery.status="skipped"` because the completion path is already responsible
-    for the result.
+    A one-shot ACP child therefore keeps a single result path: its task
+    completion reports to the parent, and a `sessions_send` to that child adds
+    no second delivery or parent/child echo loop. Accepted `sessions_send`
+    results report target admission separately from announcement delivery:
+    `targetDisposition` is `queued` or `steered`, while `delivery.status` is
+    `skipped` for every send to another session.
 
   </Accordion>
   <Accordion title="Resume an existing session">

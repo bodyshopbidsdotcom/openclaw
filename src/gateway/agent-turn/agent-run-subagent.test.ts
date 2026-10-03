@@ -1,11 +1,4 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  SessionFollowupCompletion,
-  withFollowupRequest,
-  withFollowupSuccessor,
-} from "../../agents/subagents/completion/session-followup-completion.js";
-import type { FollowupRequest } from "../../agents/subagents/completion/session-followup-completion.types.js";
-import type { SubagentRunRecord } from "../../agents/subagents/registry/subagent-registry.types.js";
 import { bindInProcessSubagentResume } from "../in-process-subagent-resume.js";
 import { prepareGatewaySubagentRun } from "./agent-run-subagent.js";
 import type { AgentTurnPrincipal } from "./types.js";
@@ -57,23 +50,6 @@ function parameters(
     assertResumeAdmissionCurrent: vi.fn(),
     context: { logGateway: { warn: vi.fn() } },
     ...overrides,
-  };
-}
-
-function followupRequest(): FollowupRequest {
-  return {
-    runId,
-    requesterSessionKey: "agent:main:main",
-    requesterSessionId: "requester-session",
-    requesterAgentId: "main",
-    targetSessionKey: childSessionKey,
-    targetAgentId: "main",
-    custody: {
-      signal: new AbortController().signal,
-      assertCurrent: () => {},
-      release: vi.fn(),
-      run: (work) => work(),
-    },
   };
 }
 
@@ -157,85 +133,5 @@ describe("Gateway native subagent admission", () => {
       pluginSubagent: false,
       reactivateSubagent: true,
     });
-  });
-
-  it.each([true, false])(
-    "binds result custody only to its original requester (matching: %s)",
-    async (matching) => {
-      const request = followupRequest();
-      try {
-        const preparation = withFollowupRequest(request, () =>
-          prepareGatewaySubagentRun(
-            parameters({
-              inputProvenance: {
-                kind: "inter_session",
-                sourceTool: "sessions_send",
-                sourceSessionKey: matching ? request.requesterSessionKey : "agent:main:other",
-              },
-            }),
-          ),
-        );
-        if (matching) {
-          const prepared = await preparation;
-          expect(prepared).toEqual({
-            pluginSubagent: false,
-            reactivateSubagent: false,
-            followupCompletion: request.completion,
-          });
-          expect(request.completion?.ownsExecution(runId)).toBe(true);
-          expect(request.completion?.accepted).toBe(false);
-        } else {
-          await expect(preparation).rejects.toThrow("requester does not match");
-          expect(request.completion).toBeUndefined();
-        }
-        expect(mocks.registerSubagentRun).not.toHaveBeenCalled();
-        expect(mocks.prepareParentSubagentResume).not.toHaveBeenCalled();
-      } finally {
-        request.completion?.close();
-      }
-    },
-  );
-
-  it("prepares a follow-up successor without adopting its paused predecessor", async () => {
-    const owner = SessionFollowupCompletion.bind(followupRequest());
-    owner.markAccepted(runId);
-    const child: SubagentRunRecord = {
-      runId: "nested-child",
-      childSessionKey: "agent:main:subagent:nested",
-      requesterSessionKey: childSessionKey,
-      requesterDisplayKey: childSessionKey,
-      task: "Nested work",
-      cleanup: "keep",
-      createdAt: 1,
-      execution: { status: "terminal", endedAt: 2, outcome: { status: "ok" } },
-      requesterSettleWake: {
-        status: "pending",
-        attemptCount: 0,
-        requesterYieldBatch: true,
-        rearmGeneration: 1,
-        batchRunIds: ["nested-child"],
-      },
-    };
-    try {
-      owner.promoteYield(runId, [child], 1);
-      await owner.settle(runId, { status: "ok", yielded: true });
-      owner.finishExecution(runId);
-      const successor = owner.successor([child], "resumed-run", () => {});
-      const prepared = await withFollowupSuccessor(successor, () =>
-        prepareGatewaySubagentRun(parameters({ runId: "resumed-run" })),
-      );
-      expect(prepared).toEqual({
-        pluginSubagent: false,
-        reactivateSubagent: false,
-        followupCompletion: owner,
-        followupSuccessor: successor,
-      });
-      expect(owner.ownsExecution(runId)).toBe(true);
-      expect(owner.ownsExecution("resumed-run")).toBe(false);
-      expect(mocks.registerSubagentRun).not.toHaveBeenCalled();
-      expect(mocks.prepareParentSubagentResume).not.toHaveBeenCalled();
-    } finally {
-      owner.close();
-    }
   });
 });

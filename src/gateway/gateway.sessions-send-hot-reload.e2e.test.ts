@@ -26,7 +26,7 @@ const TARGET_REPLY = "TARGET_REPLY_AFTER_RELOAD";
 const DISPATCH_COMPLETE = "SENDER_DISPATCH_COMPLETE";
 
 type ModelCall = {
-  kind: "dispatch" | "dispatch-complete" | "target" | "reply" | "announce";
+  kind: "dispatch" | "dispatch-complete" | "target";
   model: string;
   raw: string;
 };
@@ -174,13 +174,7 @@ async function startProvider() {
       };
       const rawModel = body.model;
       const modelId = typeof rawModel === "string" ? rawModel : "";
-      if (raw.includes("Agent-to-agent announce step:")) {
-        calls.push({ kind: "announce", model: modelId, raw });
-        textResponse(response, "ANNOUNCE_SKIP");
-      } else if (raw.includes(TARGET_REPLY) && raw.includes("Agent-to-agent reply step:")) {
-        calls.push({ kind: "reply", model: modelId, raw });
-        textResponse(response, "REPLY_SKIP");
-      } else if (raw.includes(INITIAL_PROMPT) && raw.includes("function_call_output")) {
+      if (raw.includes(INITIAL_PROMPT) && raw.includes("function_call_output")) {
         calls.push({ kind: "dispatch-complete", model: modelId, raw });
         const result = readTargetToolResult(raw);
         targetRunId = typeof result?.runId === "string" ? result.runId : undefined;
@@ -244,7 +238,7 @@ function modelDefinition(id: string): ModelDefinitionConfig {
 
 describe("sessions_send across prepared runtime reload", () => {
   it(
-    "finishes model-A work and re-admits the detached reply and announcement on model B",
+    "finishes model-A work across a prepared runtime reload without announcing back",
     { timeout: 90_000 },
     async () => {
       const provider = await startProvider();
@@ -411,21 +405,13 @@ describe("sessions_send across prepared runtime reload", () => {
         terminalReply: { disposition: "visible", text: TARGET_REPLY },
       });
 
-      phase = "waiting for detached reply";
-      await expect
-        .poll(() => provider.calls.filter((call) => call.kind === "reply").length, {
-          timeout: 20_000,
-          interval: 50,
-        })
-        .toBe(1);
-      await expect
-        .poll(
-          () =>
-            getActiveGatewayRootWorkHolders().filter((origin) => origin === "session:a2a-send")
-              .length,
-          { timeout: 20_000, interval: 50 },
-        )
-        .toBe(0);
+      phase = "checking for detached reply work";
+      // sessions_send registers any detached reply observer synchronously inside
+      // the send. A peer send registers none, so nothing survives the reload to
+      // wake the sender or announce the target's answer on model B.
+      expect(
+        getActiveGatewayRootWorkHolders().filter((origin) => origin === "session:self-reply"),
+      ).toEqual([]);
 
       const target = readSessionStoreSummaryReadOnly(
         { agentId: "target", env: process.env },
@@ -438,8 +424,6 @@ describe("sessions_send across prepared runtime reload", () => {
           expect.objectContaining({ kind: "dispatch", model: "model-a" }),
           expect.objectContaining({ kind: "target", model: "model-a" }),
           expect.objectContaining({ kind: "dispatch-complete", model: "model-a" }),
-          expect.objectContaining({ kind: "reply", model: "model-b" }),
-          expect.objectContaining({ kind: "announce", model: "model-b" }),
         ]),
       );
       const dispatchComplete = provider.calls.find((call) => call.kind === "dispatch-complete");
@@ -447,9 +431,8 @@ describe("sessions_send across prepared runtime reload", () => {
       expect(readTargetToolResult(dispatchComplete?.raw ?? "")).toMatchObject({
         targetDisposition: "queued",
       });
-      expect(provider.calls.filter((call) => call.kind === "reply")).toHaveLength(1);
-      expect(provider.calls.filter((call) => call.kind === "target")).toHaveLength(1);
-      expect(provider.calls.filter((call) => call.kind === "announce")).toHaveLength(1);
+      // No reply-back or announce turn ran in either session.
+      expect(provider.calls).toHaveLength(3);
     },
   );
 });
