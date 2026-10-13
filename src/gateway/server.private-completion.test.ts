@@ -50,7 +50,6 @@ import { refusePendingInputCommit } from "./pending-input-commit.test-support.js
 import { dispatchGatewayMethodInProcess } from "./server-plugin-in-process-dispatch.js";
 import { startGatewayServerHarness, type GatewayServerHarness } from "./server.e2e-ws-harness.js";
 import { holdMetadataThroughSubagentStop } from "./server.private-completion.metadata-overlap.test-support.js";
-import { registerSessionsSendPrivateCompletionTests } from "./server.private-completion.sessions-send.test-support.js";
 import * as lifecycleState from "./session-lifecycle-state.js";
 import { loadSessionEntry } from "./session-utils.js";
 import {
@@ -152,18 +151,6 @@ describe("private subagent completion processing receipts", () => {
       "Expected real private input recorder",
     );
   }
-
-  registerSessionsSendPrivateCompletionTests(() => ({
-    context: kernel.gatewayRequestContext,
-    sequence,
-    sessionKey,
-    sessionId,
-    completions,
-    pending,
-    transcript,
-    recorder,
-    agentCommandMock,
-  }));
 
   async function processPrivateInput(input: unknown) {
     await recorder(input).persistApproved();

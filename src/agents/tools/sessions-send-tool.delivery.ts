@@ -1,5 +1,4 @@
 import crypto from "node:crypto";
-import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { runWithInProcessGatewaySessionMutation } from "../../gateway/server-plugin-in-process-dispatch.js";
 import type { GatewaySessionStoreTarget } from "../../gateway/session-utils-store.types.js";
@@ -21,7 +20,6 @@ import {
   buildRunUserTurnIdempotencyKey,
   createUserTurnTranscriptRecorder,
 } from "../../sessions/user-turn-transcript.js";
-import { createDeferredCore } from "../../shared/deferred.js";
 import type { DeliveryContext } from "../../utils/delivery-context.types.js";
 import { listAgentIds } from "../agent-scope.js";
 import { resolveActiveEmbeddedRunSessionId } from "../embedded-agent-runner/active-run-projections.js";
@@ -122,8 +120,6 @@ type SessionsSendDeliveryParams = {
   deliveryTimeoutMs?: number;
   allowActiveRunQueueDelivery?: boolean;
   expectedSessionId?: string;
-  retainAcceptance?: boolean;
-  assertDispatchCurrent?: () => void;
   sourceOrigin?: DeliveryContext;
   mode?: "steer" | "followup";
 };
@@ -282,10 +278,7 @@ export async function startSessionsSendAgentRun(
           threadId: stringifyRouteThreadId(sourceOrigin.threadId),
         }
       : params.sendParams;
-    const accepted = params.retainAcceptance
-      ? createDeferredCore<{ runId: string; admissionPending?: boolean }>()
-      : undefined;
-    const responsePromise = params.callGateway<{ runId: string; admissionPending?: boolean }>({
+    const response = await params.callGateway<{ runId: string; admissionPending?: boolean }>({
       method: "agent",
       params: fallbackSessionKey
         ? {
@@ -295,27 +288,7 @@ export async function startSessionsSendAgentRun(
           }
         : sendParams,
       timeoutMs: 10_000,
-      assertDispatchCurrent: params.assertDispatchCurrent,
-      ...(accepted
-        ? {
-            expectFinal: true,
-            onAccepted: (payload: unknown) => {
-              const receipt = asOptionalRecord(payload);
-              if (
-                receipt?.status === "accepted" &&
-                typeof receipt.runId === "string" &&
-                receipt.admissionPending !== true
-              ) {
-                accepted.resolve({ runId: receipt.runId });
-              }
-            },
-          }
-        : {}),
     });
-    // The admission receipt survives a later final-response failure; the registry owns the result.
-    const response = await (accepted
-      ? Promise.race([accepted.promise, responsePromise])
-      : responsePromise);
     const responseRunId =
       typeof response?.runId === "string" && response.runId ? response.runId : params.runId;
     if (response?.admissionPending === true) {

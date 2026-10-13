@@ -492,7 +492,6 @@ function describeCronSeamKinds(relativePath: string, source: string) {
   const importsFollowup = hasAnyImportSource(source, [
     "./subagent-followup.js",
     "../../agents/subagent-registry.js",
-    "../../agents/tools/agent-step.js",
     "../../gateway/call.js",
   ]);
   const importsSchedulerModules =
