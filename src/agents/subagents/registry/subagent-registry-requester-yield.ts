@@ -1,7 +1,6 @@
 import type { ProgressContinuationState } from "../../../channels/progress-continuation.js";
 import { captureOpenClawStateWorkerContext } from "../../../state/openclaw-state-worker-context.js";
 import type { AcceptedSessionSpawn } from "../../accepted-session-spawn.js";
-import { promoteFollowupYield } from "../completion/session-followup-completion.js";
 import {
   promoteRequesterCronAuthority,
   type PreparedRequesterCronAuthority,
@@ -597,7 +596,6 @@ export async function settleRequesterTurnAfterSessionSpawns(params: {
     },
     finish: (members) => {
       const entries = children(members);
-      promoteFollowupYield({ requesterTurnRunId, entries, rearmGeneration });
       promoteRequesterCronAuthority({ requesterTurnRunId, batch: entries, rearmGeneration });
       if (rearmGeneration !== undefined && params.requesterAgentId) {
         promoteRequesterFinalAttachment({

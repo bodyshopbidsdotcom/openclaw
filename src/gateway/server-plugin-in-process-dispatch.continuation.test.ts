@@ -9,7 +9,6 @@ import {
   callAgentToolGatewayRequest,
   runWithGatewayToolContinuationContext,
 } from "../agents/tools/in-process-gateway.js";
-import { runSessionsSendA2AFlow } from "../agents/tools/sessions-send-tool.a2a.js";
 import { createReplyTurnParticipants } from "../auto-reply/reply/reply-run-registry.tool-authority.js";
 import { upsertSessionEntryCore } from "../config/sessions/session-accessor.js";
 import { withPluginRuntimeGatewayRequestScope } from "../plugins/runtime/gateway-request-scope.js";
@@ -202,7 +201,7 @@ describe("typed in-process agent continuation authorization", () => {
   );
 
   it.each(["disconnected", "device revoked", "gateway replaced"] as const)(
-    "settles sessions_send after its requester ends (%s)",
+    "settles a detached tool continuation after its requester ends (%s)",
     async (boundary) => {
       const owner = createOperatorClient({
         profileName: "reply-owner",
@@ -312,27 +311,41 @@ describe("typed in-process agent continuation authorization", () => {
                         },
                       });
                       startTurn.mockClear();
-                      const pending = runWithGatewayToolContinuationContext(() =>
-                        runSessionsSendA2AFlow({
-                          targetAgentId: "main",
-                          targetSessionKey: "agent:main:child",
-                          displayKey: "agent:main:child",
-                          requesterAgentId: "main",
-                          requesterSessionKey: "agent:main:requester",
-                          requesterChannel: "webchat",
-                          replyMode: "one-way",
-                          runId: "target-followup",
-                          replyTimeoutMs: 10_000,
-                          callGateway: async (request) => {
-                            try {
-                              return await callAgentToolGatewayRequest(request);
-                            } catch (error) {
-                              dispatchErrors.push(String(error));
-                              throw error;
-                            }
+                      const dispatch = async (
+                        request: Parameters<typeof callAgentToolGatewayRequest>[0],
+                      ) => {
+                        try {
+                          return await callAgentToolGatewayRequest(request);
+                        } catch (error) {
+                          dispatchErrors.push(String(error));
+                          throw error;
+                        }
+                      };
+                      // The detached work outlives the tool call: it observes another
+                      // run, then starts a requester turn through the captured caller.
+                      const pending = runWithGatewayToolContinuationContext(async () => {
+                        await dispatch({
+                          method: "agent.wait",
+                          params: { runId: "target-followup", timeoutMs: 10_000 },
+                        });
+                        await dispatch({
+                          method: "agent",
+                          params: {
+                            agentId: "main",
+                            sessionKey: "agent:main:requester",
+                            message: "Target work finished",
+                            idempotencyKey: "requester-continuation",
+                            deliver: false,
+                            sourceReplyDeliveryMode: "message_tool_only",
+                            inputProvenance: {
+                              kind: "inter_session",
+                              sourceSessionKey: "agent:main:child",
+                              sourceTool: "subagent_announce",
+                              sourceRole: "subagent",
+                            },
                           },
-                        }),
-                      );
+                        });
+                      }).catch(() => undefined);
                       await waitStarted.promise;
                       return { pending };
                     }),

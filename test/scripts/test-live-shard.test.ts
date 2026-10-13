@@ -442,10 +442,6 @@ describe("scripts/test-live-shard", () => {
       "OPENCLAW_LIVE_SUBAGENT_E2E",
     ],
     [
-      "src/agents/subagents/announce/subagent-followup-yield.live.test.ts",
-      "OPENCLAW_LIVE_SUBAGENT_E2E",
-    ],
-    [
       "src/agents/subagents/announce/subagent-late-reply.live.test.ts",
       "OPENCLAW_LIVE_SUBAGENT_STRESS",
     ],
@@ -457,7 +453,6 @@ describe("scripts/test-live-shard", () => {
       "src/agents/subagents/announce/subagent-yield-resume.live.test.ts",
       "OPENCLAW_LIVE_SUBAGENT_STRESS",
     ],
-    ["src/agents/tools/sessions-send-peer.live.test.ts", "OPENCLAW_LIVE_SUBAGENT_STRESS"],
     ["extensions/anthropic/cli-output.compaction.live.test.ts", "OPENCLAW_LIVE_CLAUDE_COMPACTION"],
     [
       "extensions/codex/src/app-server/approval-requester.real-binary.live.test.ts",
