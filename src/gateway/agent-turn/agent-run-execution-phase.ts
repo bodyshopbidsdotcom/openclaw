@@ -8,10 +8,7 @@ import {
   attachAgentCommandAdmissionFacts,
   attachAgentCommandRecoveryAdmissionFacts,
 } from "../../agents/agent-command-admission-facts.js";
-import {
-  buildAgentRunTerminalOutcome,
-  type AgentRunTerminalOutcome,
-} from "../../agents/agent-run-terminal-outcome.js";
+import { buildAgentRunTerminalOutcome } from "../../agents/agent-run-terminal-outcome.js";
 import { repairMainSessionRecoveryMutation } from "../../agents/main-session-recovery/main-session-recovery-lifecycle.js";
 import { scheduleMainSessionRecoveryPendingTarget } from "../../agents/main-session-recovery/main-session-recovery-owner-release.js";
 import {
@@ -62,7 +59,6 @@ import { createAgentRunDiagnostics } from "./agent-run-diagnostics.js";
 import { withAgentRunDispatchExecutionIdentity } from "./agent-run-dispatch-execution-identity.js";
 import { resolveExecutionIdentitySpawnFacts } from "./agent-run-execution-lineage.js";
 import type { StartAgentRunExecutionParams } from "./agent-run-execution-types.js";
-import { settleUnstartedGatewayFollowup } from "./agent-run-subagent.js";
 import {
   annotateAgentRunUserTurnPrompt,
   finalizePreparedAgentRunUserTurn,
@@ -92,7 +88,6 @@ async function executeAgentRun(params: StartAgentRunExecutionParams): Promise<vo
   };
   let unpersistedOffloadedRefs = prepared.unpersistedOffloadedRefs;
   const releaseGatewayRootContinuation = retainGatewayRootWorkAdmissionContinuation() ?? undefined;
-  let finishUndispatchedFollowup = false;
   try {
     await using runtimeResources = new AsyncDisposableStack();
     let preparedModelRuntimeLease = runtimeResources.use(prepared.preparedModelRuntimeLease);
@@ -104,25 +99,6 @@ async function executeAgentRun(params: StartAgentRunExecutionParams): Promise<vo
     const abortController = abortRegistration.controller;
     const operationalRunInstance = prepared.operationalRunInstance;
     const sessionKey = abortEntry?.sessionKey;
-    const admittedRunIdentity = abortEntry
-      ? {
-          controller: abortController,
-          operationalRunInstance,
-          lifecycleGeneration: params.lifecycleGeneration,
-          sessionKey: abortEntry.sessionKey,
-        }
-      : undefined;
-    const assertSettlementCurrent = () => {
-      params.assertContextCurrent?.();
-      assertAgentRunLifecycleGenerationCurrent(params.lifecycleGeneration);
-      // Cancellation closes execution, but its retained producer still records the outcome.
-      if (
-        !leaseActive ||
-        (abortRegistration.registered && !prepared.activeGatewayWorkAdmission.isActive())
-      ) {
-        throw new Error("Agent settlement no longer owns this Gateway run");
-      }
-    };
     const assertDispatchCurrent = () => {
       params.assertContextCurrent?.();
       prepared.operatorAuthority?.assertCurrent();
@@ -185,18 +161,6 @@ async function executeAgentRun(params: StartAgentRunExecutionParams): Promise<vo
       let dispatched = false;
       let publishFinalAfterCleanup: (() => void) | undefined;
       let pendingRecovery: MainSessionRecoveryPendingTarget | undefined;
-      const settleUnstartedFollowup = (outcome: AgentRunTerminalOutcome) =>
-        !dispatched
-          ? settleUnstartedGatewayFollowup({
-              completion: prepared.followupCompletion,
-              runId: params.runId,
-              admittedRunEntry: abortEntry,
-              admittedRunIdentity,
-              context: params.context,
-              isIncognito: diagnostics.incognito,
-              outcome,
-            })
-          : undefined;
       const finishFailure = async (err: unknown, recordCompletion = true) => {
         const error = errorShapeFromError(ErrorCodes.UNAVAILABLE, err);
         const renderedErr = error.message;
@@ -208,7 +172,6 @@ async function executeAgentRun(params: StartAgentRunExecutionParams): Promise<vo
             diagnostics.warning("input completion persistence failed")(completionError);
           }
         }
-        await settleUnstartedFollowup(outcome);
         const payload = { runId: params.runId, status: "error" as const, summary: renderedErr };
         publishFinalAfterCleanup = () => {
           setGatewayDedupeEntries({
@@ -240,7 +203,6 @@ async function executeAgentRun(params: StartAgentRunExecutionParams): Promise<vo
           await finishFailure(error, false);
           return;
         }
-        await settleUnstartedFollowup(outcome);
         publishFinalAfterCleanup = () => {
           setAbortedAgentDedupeEntries({
             dedupe: params.context.dedupe,
@@ -457,7 +419,6 @@ async function executeAgentRun(params: StartAgentRunExecutionParams): Promise<vo
           withAgentRunDispatchExecutionIdentity(
             {
               assertCurrent: assertDispatchCurrent,
-              assertSettlementCurrent,
               admittedRunEntry: abortEntry,
               commandRuntimeContext: {
                 config: replyDispatchRuntime.config,
@@ -643,7 +604,6 @@ async function executeAgentRun(params: StartAgentRunExecutionParams): Promise<vo
               io: params.io,
               context: params.context,
               isIncognito: diagnostics.incognito,
-              followupCompletion: prepared.followupCompletion,
               restoreAdmittedRecovery: prepared.restoreAdmittedRestartRecoveryInterrupted,
               canonicalSkillWorkspaceDir: params.sessionEntry?.worktree?.canonicalWorkspaceDir,
             },
@@ -696,7 +656,6 @@ async function executeAgentRun(params: StartAgentRunExecutionParams): Promise<vo
           try {
             await mediaCleanup;
           } finally {
-            finishUndispatchedFollowup = !dispatched;
             publishFinalAfterCleanup?.();
           }
         }
@@ -704,13 +663,7 @@ async function executeAgentRun(params: StartAgentRunExecutionParams): Promise<vo
     });
   } finally {
     // Shutdown joins the execution through asynchronous runtime disposal, not just bookkeeping.
-    try {
-      prepared.releaseCallerAuthority?.();
-      releaseGatewayRootContinuation?.();
-    } finally {
-      if (finishUndispatchedFollowup) {
-        prepared.followupCompletion?.finishExecution(params.runId);
-      }
-    }
+    prepared.releaseCallerAuthority?.();
+    releaseGatewayRootContinuation?.();
   }
 }

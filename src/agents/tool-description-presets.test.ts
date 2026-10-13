@@ -80,7 +80,10 @@ describe("sessions_send tool description", () => {
     expect(describeSessionsSendTool()).toContain("on this Gateway");
     expect(describeSessionsSendTool()).toContain("not an external address");
     expect(describeSessionsSendTool()).not.toContain("conversations_");
-    expect(describeSessionsSendTool()).toContain("A peer reply reaches you once");
+    expect(describeSessionsSendTool()).toContain("Replies are never reported back");
+    expect(describeSessionsSendTool()).toContain(
+      "nothing wakes you later, so ask the target to sessions_send you its result",
+    );
     expect(describeSessionsSendTool()).toContain("Continue with another sessions_send");
     expect(describeSessionsSendTool()).toContain("post to channels with message");
     expect(describeSessionsSendTool()).toContain('`targetDisposition: "queued"` or `"steered"`');

@@ -269,7 +269,7 @@ function modelDefinition(id: string): ModelDefinitionConfig {
 
 describe("sessions_send across prepared runtime reload", () => {
   it(
-    "finishes model-A work and re-admits one detached requester reply on model B",
+    "finishes model-A work across a prepared runtime reload without announcing back",
     { timeout: 90_000 },
     async () => {
       const started = performance.now();
@@ -477,22 +477,14 @@ describe("sessions_send across prepared runtime reload", () => {
         terminalReply: { disposition: "visible", text: TARGET_REPLY },
       });
 
-      phase = "waiting for detached reply";
+      phase = "checking for detached reply work";
       trace({ kind: "phase", phase });
-      await expect
-        .poll(() => provider.calls.filter((call) => call.kind === "reply").length, {
-          timeout: 20_000,
-          interval: 50,
-        })
-        .toBe(1);
-      await expect
-        .poll(
-          () =>
-            getActiveGatewayRootWorkHolders().filter((origin) => origin === "session:a2a-send")
-              .length,
-          { timeout: 20_000, interval: 50 },
-        )
-        .toBe(0);
+      // sessions_send registers any detached reply observer synchronously inside
+      // the send. A peer send registers none, so nothing survives the reload to
+      // wake the sender or announce the target's answer on model B.
+      expect(
+        getActiveGatewayRootWorkHolders().filter((origin) => origin === "session:self-reply"),
+      ).toEqual([]);
 
       const target = readSessionStoreSummaryReadOnly(
         { agentId: "target", env: process.env },
@@ -505,7 +497,6 @@ describe("sessions_send across prepared runtime reload", () => {
           expect.objectContaining({ kind: "dispatch", model: "model-a" }),
           expect.objectContaining({ kind: "target", model: "model-a" }),
           expect.objectContaining({ kind: "dispatch-complete", model: "model-a" }),
-          expect.objectContaining({ kind: "reply", model: "model-b" }),
         ]),
       );
       const dispatchComplete = provider.calls.find((call) => call.kind === "dispatch-complete");
@@ -513,9 +504,10 @@ describe("sessions_send across prepared runtime reload", () => {
       expect(readTargetToolResult(dispatchComplete?.raw ?? "")).toMatchObject({
         targetDisposition: "queued",
       });
-      expect(provider.calls.filter((call) => call.kind === "reply")).toHaveLength(1);
+      // No reply-back or announce turn ran in either session.
+      expect(provider.calls.filter((call) => call.kind === "reply")).toHaveLength(0);
       expect(provider.calls.filter((call) => call.kind === "target")).toHaveLength(1);
-      expect(provider.calls).toHaveLength(4);
+      expect(provider.calls).toHaveLength(3);
     },
   );
 });
