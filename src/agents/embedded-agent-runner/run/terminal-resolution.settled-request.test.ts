@@ -1,13 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { makeTextToolResult } from "../../../../test/helpers/text-tool-result.js";
 import { setReplyPayloadMetadata } from "../../../auto-reply/reply-payload.js";
+import { SILENT_REPLY_TOKEN } from "../../../auto-reply/tokens.js";
 import {
   buildEmbeddedRunnerAssistant,
   makeEmbeddedRunnerAttempt,
 } from "../../test-helpers/embedded-agent-runner-e2e-fixtures.js";
 import { buildEmbeddedRunPayloads } from "./payloads.js";
 import { resolveEmbeddedRunAttemptTerminalState } from "./terminal-outcome.js";
-import { resolveSettledTurnFinalizationRequest } from "./terminal-resolution.js";
+import {
+  resolveEmbeddedRunTerminal,
+  resolveSettledTurnFinalizationRequest,
+} from "./terminal-resolution.js";
+import { makeTerminalInput } from "./terminal-resolution.test-support.js";
 
 const SETTLED_TOOL_TERMINAL_CONTINUATION_INSTRUCTION =
   "The previous assistant turn completed its tool calls but did not produce a user-visible answer. Continue from the current transcript and produce the final user-visible answer now. Do not repeat completed tool calls or restart from scratch. Tools are unavailable in this step: it is a text-only pass, so reply with plain text and do not attempt any tool call.";
@@ -60,6 +65,51 @@ describe("resolveSettledTurnFinalizationRequest", () => {
         settledTurnFinalizationAvailable: true,
       }),
     ).toBeNull();
+  });
+
+  it("completes an optional inter-session NO_REPLY after sessions_send as silence", async () => {
+    const assistant = buildEmbeddedRunnerAssistant({
+      content: [{ type: "text", text: SILENT_REPLY_TOKEN }],
+    });
+    const attempt = makeEmbeddedRunnerAttempt({
+      assistantTexts: [SILENT_REPLY_TOKEN],
+      lastAssistant: assistant,
+      currentAttemptAssistant: assistant,
+      toolMetas: [{ toolName: "sessions_send", replaySafe: false }],
+      itemLifecycle: { startedCount: 1, completedCount: 1, activeCount: 0 },
+      replayMetadata: { hadPotentialSideEffects: true, replaySafe: false },
+      currentAttemptReplayMetadata: { hadPotentialSideEffects: true, replaySafe: false },
+    });
+    const input = (terminalReplyExpectation: "required" | "optional") =>
+      makeTerminalInput({
+        attempt,
+        attemptAssistant: assistant,
+        finalAssistantRawText: SILENT_REPLY_TOKEN,
+        runParams: {
+          terminalReplyExpectation,
+          inputProvenance: { kind: "inter_session", sourceTool: "subagent_settle" },
+        },
+      });
+    const finalization = (terminalReplyExpectation: "required" | "optional") =>
+      resolveSettledTurnFinalizationRequest({
+        ...input(terminalReplyExpectation),
+        hasTerminalToolPresentation: false,
+        settledTurnFinalizationAvailable: true,
+      });
+
+    expect(finalization("required")).toBe(SETTLED_TOOL_TERMINAL_CONTINUATION_INSTRUCTION);
+    expect(finalization("optional")).toBeNull();
+    const optional = input("optional");
+    const resolved = await resolveEmbeddedRunTerminal(optional);
+    expect(resolved).toMatchObject({
+      action: "complete",
+      result: {
+        payloads: [{ text: SILENT_REPLY_TOKEN }],
+        meta: { terminalReplyKind: "silent-empty", finalAssistantRawText: SILENT_REPLY_TOKEN },
+      },
+    });
+    expect(resolved.action === "complete" && resolved.result.meta.error).toBeFalsy();
+    expect(optional.sessionPromptState.activateInternalPrompt).not.toHaveBeenCalled();
   });
 
   it("requires an available finalizer and no visible structured error", () => {
