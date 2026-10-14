@@ -523,7 +523,7 @@ export function createSessionsSendTool(opts?: SessionsSendToolOptions): AnyAgent
             // Thread and channel keys carry a human-facing route. Delivery off and
             // message-tool-only replies keep this run's final reply off it; the target
             // posts there only via `message`. A fire-and-forget self-send replies to its
-            // source route later through the A2A flow.
+            // source route later through sessions-send-self-reply.
             deliver: false,
             sourceReplyDeliveryMode: "message_tool_only" as const,
             channel: INTERNAL_MESSAGE_CHANNEL,
