@@ -2666,7 +2666,7 @@ describe("deliverSubagentAnnouncement completion delivery", () => {
       localOnly,
     ),
     settleCase(
-      "rejects a yielded turn that emits only the silent reply token",
+      "rejects a silent payload without a raw silent final (empty reply)",
       { payloads: [{ text: "NO_REPLY" }] },
       localOnly,
     ),

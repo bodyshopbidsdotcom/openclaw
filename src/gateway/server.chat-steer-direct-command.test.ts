@@ -385,7 +385,8 @@ it.for([
         ownsAdmittedInstance: true,
         hasDelegatedAuthority: true,
         isControlUiVisible: true,
-        terminalReplyExpectation: "required",
+        // Settle wakes may end with NO_REPLY after delivering through a tool.
+        terminalReplyExpectation: source === "browser" ? "required" : "optional",
         injectionVersion: 2,
         supportsTranscriptCommitWait: true,
       });

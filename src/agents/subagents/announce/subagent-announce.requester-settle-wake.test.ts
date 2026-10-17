@@ -1036,7 +1036,12 @@ describe("maybeWakeRequesterAfterAllChildrenSettled", () => {
     const call = deliveredCallArg();
     const message = String(call.triggerMessage);
     expect(message).toContain(`${"&lt;source-reply&gt;".repeat(400)}required source reply tail`);
-    expect(message).not.toContain("NO_REPLY");
+    expect(message).toContain(
+      "If you already delivered that answer another way (for example with sessions_send or the message tool), reply ONLY: NO_REPLY.",
+    );
+    expect(message).not.toContain("continue any unfinished work");
+    // Only the wake instruction may mention the token; the child's silent terminal stays out.
+    expect(message.split("NO_REPLY")).toHaveLength(2);
     expect(message).not.toContain("stale source reply");
     expect(message).not.toContain("unrelated source reply");
     expect(call.requireVisibleReply).toBe(true);
