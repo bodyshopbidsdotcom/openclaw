@@ -53,6 +53,10 @@ export function isInternalSourceReplyChannel(ctx: SourceReplyDeliveryModeContext
   );
 }
 
+function resolveConfiguredGroupVisibleReplies(cfg: OpenClawConfig) {
+  return cfg.messages?.groupChat?.visibleReplies ?? cfg.messages?.visibleReplies;
+}
+
 export function resolveSourceReplyDeliveryMode(params: {
   cfg: OpenClawConfig;
   ctx: SourceReplyDeliveryModeContext;
@@ -82,7 +86,7 @@ export function resolveSourceReplyDeliveryMode(params: {
     return "message_tool_only";
   }
   const configuredMode = isGroup
-    ? (params.cfg.messages?.groupChat?.visibleReplies ?? params.cfg.messages?.visibleReplies)
+    ? resolveConfiguredGroupVisibleReplies(params.cfg)
     : (params.cfg.messages?.visibleReplies ??
       (isInternalSourceReplyChannel(params.ctx) ? "automatic" : params.defaultVisibleReplies));
   return configuredMode === "message_tool" && params.messageToolAvailable !== false
@@ -90,7 +94,11 @@ export function resolveSourceReplyDeliveryMode(params: {
     : "automatic";
 }
 
-/** Selects reply requiredness at admission, preserving configured ambient group silence. */
+/**
+ * Selects reply requiredness at admission, preserving configured ambient group silence.
+ * A group that allows silence and routes visible replies through the message tool hands
+ * the agent every visible reply, so a mention there may also end silently.
+ */
 export function resolveSourceReplyExpectation(params: {
   ctx: SourceReplyDeliveryModeContext;
   cfg: OpenClawConfig;
@@ -118,7 +126,8 @@ export function resolveSourceReplyExpectation(params: {
   });
   if (
     conversationType === "group" &&
-    params.ctx.WasMentioned !== true &&
+    (params.ctx.WasMentioned !== true ||
+      resolveConfiguredGroupVisibleReplies(params.cfg) === "message_tool") &&
     resolveSilentReplySettings({
       cfg: params.cfg,
       surface: params.ctx.Surface ?? params.ctx.Provider,
