@@ -107,7 +107,7 @@ export function describeSessionsSendTool(): string {
     "A session identifies model context, not an external address. Continue with another sessions_send; post to channels with message.",
     SESSIONS_SEND_RESULT_GUIDANCE,
     "Omit mode to automatically continue your paused native child task; returns runId/taskRunId with task-owned completion instead of an inline wait or watch. With timeoutSeconds:0, your own running child is steered into its active run (admission only, no separate completion turn; use mode:followup for one); other sessions use ordinary message delivery. mode:notify queues ephemeral context for the next turn without waking or starting work (bounded process memory, not a durable inbox). mode:steer injects guidance into an active supported run and never starts idle work. mode:followup starts a separate turn without steering or resuming a paused task. mode:resume requires a paused native child task and rejects watch:true and positive timeoutSeconds.",
-    'Thread chats rejected: target parent channel. Missing configured-agent main created. status "no_reply" is terminal, so do not wait for another reply.',
+    'Thread chats allowed: the target run posts no automatic final reply there; it can call `message` to post. Missing configured-agent main created. status "no_reply" is terminal, so do not wait for another reply.',
     "watch:true reports later target-session changes; on a steer into your own running child it can claim that child's existing pending completion for sessions_yield.",
   ].join(" ");
 }
