@@ -54,9 +54,19 @@ export function resolveCommandReplyExpectation(params: {
   if (
     params.opts.privateCompletion ||
     params.opts.lane === AGENT_LANE_SUBAGENT ||
-    isSubagentSessionKey(params.sessionKey) ||
-    !isDeliverableMessageChannel(params.messageChannel ?? "")
+    isSubagentSessionKey(params.sessionKey)
   ) {
+    return "required";
+  }
+  // Agent-to-agent turns may deliver through a tool (sessions_send, message), then end silently.
+  const sourceTool = params.opts.inputProvenance?.sourceTool?.toLowerCase();
+  if (
+    params.opts.inputProvenance?.kind === "inter_session" &&
+    (sourceTool === "sessions_send" || sourceTool === "subagent_settle")
+  ) {
+    return "optional";
+  }
+  if (!isDeliverableMessageChannel(params.messageChannel ?? "")) {
     return "required";
   }
   if (params.opts.inputProvenance?.kind !== "inter_session") {
