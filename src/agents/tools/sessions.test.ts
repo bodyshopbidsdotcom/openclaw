@@ -3,6 +3,7 @@ import { MAX_TIMER_TIMEOUT_MS } from "@openclaw/normalization-core/number-coerci
 // Sessions tool tests cover list/send helpers and session delivery target resolution.
 import { createRequireRecord } from "openclaw/plugin-sdk/test-fixtures";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { resolveSessionThreadInfo } from "../../channels/plugins/session-conversation.js";
 import { upsertSessionEntryCore } from "../../config/sessions/session-accessor.js";
 import {
   getOwnedSessionTranscriptWriterFence,
@@ -888,7 +889,10 @@ describe("sessions_send gating", () => {
     );
   });
 
-  it("rejects label targets that resolve to canonical thread sessions", async () => {
+  it.each([
+    { name: "a Slack thread key", key: "agent:main:slack:channel:C123:thread:1710000000.000100" },
+    { name: "a label", key: "agent:main:discord:channel:123456:thread:987654", label: "thread" },
+  ])("dispatches $name to the exact thread session", async ({ key, label }) => {
     setActivePluginRegistry(createSessionConversationTestRegistry());
     loadConfigMock.mockReturnValue({
       session: { scope: "per-sender", mainKey: "main" },
@@ -897,25 +901,26 @@ describe("sessions_send gating", () => {
         sessions: { visibility: "all" },
       },
     });
-    const threadSessionKey = "agent:main:discord:channel:123456:thread:987654";
-    callGatewayMock.mockResolvedValueOnce({ key: threadSessionKey });
-    const tool = createMainSessionsSendTool();
+    expect(resolveSessionThreadInfo(key).threadId).toBeTruthy();
+    if (label) {
+      callGatewayMock.mockResolvedValueOnce({ key });
+    }
 
-    const result = await tool.execute("call-thread-label", {
-      label: "active thread",
+    const result = await createMainSessionsSendTool().execute("call-thread-target", {
+      ...(label ? { label } : { sessionKey: key }),
       message: "hi",
       timeoutSeconds: 0,
     });
 
-    const details = requireDetails(result);
-    expect(details.status).toBe("error");
-    expect(details.sessionKey).toBe(threadSessionKey);
-    expect((result.details as { error?: string } | undefined)?.error ?? "").toContain(
-      "cannot target a thread session",
-    );
-    expect(callGatewayMock).toHaveBeenCalledTimes(2);
-    expect(requireGatewayRequest().method).toBe("sessions.resolve");
-    expect(requireGatewayRequest(1).method).toBe("sessions.resolve");
+    expect(requireDetails(result)).toMatchObject({ status: "accepted", sessionKey: key });
+    // The thread route stays human-facing: no delivery, message-tool-only replies.
+    const agentCall = callGatewayMock.mock.calls.find(([request]) => request.method === "agent");
+    expect(agentCall?.[0].params).toMatchObject({
+      sessionKey: key,
+      deliver: false,
+      sourceReplyDeliveryMode: "message_tool_only",
+      channel: "webchat",
+    });
   });
 
   it("does not disclose a resolved thread session key from a sessionId target", async () => {
@@ -938,13 +943,9 @@ describe("sessions_send gating", () => {
     });
 
     const details = requireDetails(result);
-    expect(details.status).toBe("error");
-    expect(details.sessionKey).toBe("thread-session-id");
-    expect((result.details as { error?: string } | undefined)?.error ?? "").toContain(
-      "cannot target a thread session",
-    );
-    expect(callGatewayMock).toHaveBeenCalledTimes(1);
-    expect(requireGatewayRequest().method).toBe("sessions.resolve");
+    expect(details).toMatchObject({ status: "forbidden", sessionKey: "thread-session-id" });
+    expect(JSON.stringify(details)).not.toContain(threadSessionKey);
+    expect(callGatewayMock.mock.calls.map(([request]) => request.method)).not.toContain("agent");
   });
 
   it("rejects synchronous sends to the raw legacy direct-message caller", async () => {
