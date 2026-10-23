@@ -3,7 +3,6 @@ import { finiteSecondsToTimerSafeMilliseconds } from "@openclaw/normalization-co
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { readAcpSessionMetaForEntry } from "../../acp/runtime/session-meta-readonly.js";
-import { resolveSessionThreadInfo } from "../../channels/plugins/session-conversation.js";
 import { tryResolveLegacyCompatibilityAgentId } from "../../config/legacy.default-agent-owner.js";
 import { createRuntimeConfigReader } from "../../config/runtime-snapshot.js";
 import { resolvePersistedSessionStoreOwnerForKey } from "../../config/sessions/session-store-owner.js";
@@ -407,13 +406,6 @@ export function createSessionsSendTool(opts?: SessionsSendToolOptions): AnyAgent
           runId,
         );
       }
-      if (resolveSessionThreadInfo(resolvedKey).threadId) {
-        return sendFailure(
-          "error",
-          "sessions_send cannot target a thread session for inter-agent coordination. Use the parent channel session key instead.",
-          unresolvedDisplayKey,
-        );
-      }
       const authorizationTargetKey = mayUseRequesterForLiteralSentinel
         ? effectiveRequesterKey
         : targetAgentId && !parseAgentSessionKey(resolvedKey)
@@ -518,6 +510,10 @@ export function createSessionsSendTool(opts?: SessionsSendToolOptions): AnyAgent
             agentId: targetAgentId,
             sessionKey: resolvedKey,
             idempotencyKey,
+            // Thread and channel keys carry a human-facing route. Delivery off and
+            // message-tool-only replies keep this run's final reply off it; the target
+            // posts there only via `message`. A fire-and-forget self-send replies to its
+            // source route later through the A2A flow.
             deliver: false,
             sourceReplyDeliveryMode: "message_tool_only" as const,
             channel: INTERNAL_MESSAGE_CHANNEL,
