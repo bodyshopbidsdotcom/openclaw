@@ -167,7 +167,7 @@ Details: [Configuration](/gateway/config-agents/messages-and-talk#messages) and 
 
 ## Silent replies
 
-The silent token `NO_REPLY` (case-insensitive, so `no_reply` also matches) is reserved for sessions connected to external message channels and is never delivered as user-visible text. Subagents, the Control UI, and other internal sessions must return a result or continue unfinished work; a silent token cannot complete their task. When a turn also has pending tool media, such as generated TTS audio, OpenClaw strips the silent text but still delivers the media attachment.
+The silent token `NO_REPLY` (case-insensitive, so `no_reply` also matches) is reserved for sessions connected to external message channels and is never delivered as user-visible text. Subagents, the Control UI, and other internal sessions must return a result or continue unfinished work; a silent token cannot complete their task. Agent-to-agent turns are the exception: a turn started by `sessions_send` or a subagent settle wake may end with exactly `NO_REPLY` after it delivered its result another way, such as `sessions_send` or the `message` tool. When a turn also has pending tool media, such as generated TTS audio, OpenClaw strips the silent text but still delivers the media attachment.
 
 Silence policy resolves by conversation type:
 

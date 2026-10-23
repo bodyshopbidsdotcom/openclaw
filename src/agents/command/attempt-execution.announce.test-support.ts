@@ -1,10 +1,66 @@
 import type { SessionEntry } from "../../config/sessions.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import type { ReplyExpectation } from "../reply-completion.js";
 import { attachToolAllowlistIntersection } from "../tool-policy.js";
 import type { AgentCommandOpts } from "./types.js";
 
 const SUBAGENT_ANNOUNCE_CHILD_SESSION_KEY = "agent:main:subagent:child";
 const SUBAGENT_ANNOUNCE_REQUESTER_TOOLS = ["read", "exec", "sessions_spawn", "message"];
+
+/** Reply obligations for inter-session input; telegram groups allow silence in the fixture. */
+export const INTER_SESSION_REPLY_EXPECTATION_CASES: ReadonlyArray<{
+  sessionKey: string;
+  messageChannel: string;
+  privateCompletion?: true;
+  lane?: string;
+  sourceTool: string;
+  expected: ReplyExpectation;
+}> = [
+  // Children, private completions, and child reports still owe a result.
+  ...(
+    [
+      ["agent:main:subagent:reply-required", "discord", "subagent_settle"],
+      ["agent:main:subagent:peer-required", "webchat", "sessions_send"],
+      ["agent:main:telegram:direct:report-required", "telegram", "subagent_announce"],
+    ] as const
+  ).map(([sessionKey, messageChannel, sourceTool]) => ({
+    sessionKey,
+    messageChannel,
+    sourceTool,
+    expected: "required" as const,
+  })),
+  {
+    sessionKey: "agent:main:direct:private-reply-required",
+    messageChannel: "telegram",
+    privateCompletion: true,
+    sourceTool: "subagent_settle",
+    expected: "required",
+  },
+  {
+    sessionKey: "agent:main:direct:lane-required",
+    messageChannel: "webchat",
+    lane: "subagent",
+    sourceTool: "sessions_send",
+    expected: "required",
+  },
+  // Allowed group silence, and agent-to-agent turns that may deliver through a tool.
+  ...(
+    [
+      ["agent:main:telegram:group:report-optional", "telegram", "subagent_announce"],
+      ["agent:main:direct:settle-optional", "webchat", "subagent_settle"],
+      ["agent:main:telegram:direct:settle-optional", "telegram", "subagent_settle"],
+      ["agent:main:telegram:group:settle-optional", "telegram", "subagent_settle"],
+      ["agent:main:direct:peer-optional", "webchat", "sessions_send"],
+      ["agent:main:telegram:direct:delegated", "telegram", "sessions_send"],
+      ["agent:main:telegram:group:delegated", "telegram", "sessions_send"],
+    ] as const
+  ).map(([sessionKey, messageChannel, sourceTool]) => ({
+    sessionKey,
+    messageChannel,
+    sourceTool,
+    expected: "optional" as const,
+  })),
+];
 
 export function createSubagentAnnounceConfig(
   { operatorTools, sandboxMode }: SubagentAnnounceDeliveryCase,
