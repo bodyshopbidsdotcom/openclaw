@@ -261,28 +261,11 @@ export class SubagentLaunchManager extends SubagentRecoveryManager {
           );
         }
       };
-      const result = await mutateSubagentRuns(
+      await mutateSubagentRuns(
         [...runIds],
         (rows) => {
           assertCurrent();
           const previous = rows.get(runId);
-          if (previous && options.acceptedRunReplay === true) {
-            if (
-              previous.childSessionKey !== childSessionKey ||
-              previous.requesterSessionKey !== requesterSessionKey ||
-              previous.requesterAgentId !== requesterAgentId ||
-              previous.requesterTurnRunId !==
-                (registerParams.requesterTurnRunId?.trim() || undefined) ||
-              previous.expectsCompletionMessage !== registerParams.expectsCompletionMessage ||
-              Boolean(previous.collect) !== Boolean(registerParams.collect)
-            ) {
-              throw new SubagentRegistryMutationRejectedError(
-                "Accepted run already has another completion owner; inspect it before retrying.",
-              );
-            }
-            subagentRuns.runWithCompletionAuthority(previous, () => options.assertCurrent?.());
-            return { value: undefined };
-          }
           if (selected ? !isSameSubagentRunOwner(previous, selected) : previous !== undefined) {
             throw new SubagentRegistryMutationRejectedError(
               "Subagent registration owner changed during preparation",
@@ -381,9 +364,6 @@ export class SubagentLaunchManager extends SubagentRecoveryManager {
           },
         },
       );
-      if (!result) {
-        return;
-      }
       const published = currentEntry();
       if (!published) {
         throw new SubagentRegistryMutationRejectedError(

@@ -2,8 +2,6 @@ import { beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
 import type { AgentCommandDeliveryResult } from "../../agents/command/delivery-result.js";
 import type { AgentCommandOpts } from "../../agents/command/types.js";
-import { SessionFollowupCompletion } from "../../agents/subagents/completion/session-followup-completion.js";
-import type { SubagentRunRecord } from "../../agents/subagents/registry/subagent-registry.types.js";
 import * as transcript from "../../sessions/user-turn-transcript-admission.js";
 import { createChatAbortOps } from "../chat-abort-ops.js";
 import { abortChatRunById, type ChatAbortControllerEntry } from "../chat-abort.js";
@@ -56,46 +54,6 @@ describe("Gateway dispatch run ownership", () => {
       context: f.context,
     };
     return { ...f, params };
-  }
-
-  function createFollowupDispatch() {
-    const f = createDispatch(true);
-    const owner = SessionFollowupCompletion.bind({
-      runId: f.runId,
-      requesterSessionKey: "agent:main:parent",
-      requesterSessionId: "requester-session",
-      requesterAgentId: "main",
-      targetAgentId: "main",
-      targetSessionKey: f.sessionKey,
-      custody: {
-        run: (work) => work(),
-        assertCurrent: vi.fn(),
-        signal: new AbortController().signal,
-        release: vi.fn(),
-      },
-    });
-    const dispatch = (
-      runId = f.runId,
-      entry = f.entry,
-      assertCurrent?: () => void,
-      onSettled?: Parameters<typeof dispatchAgentRunFromGateway>[0]["onSettled"],
-    ) => {
-      owner.markAccepted(runId);
-      return dispatchAgentRunFromGateway({
-        ...f.params,
-        assertCurrent,
-        admittedRunEntry: entry,
-        ingressOpts: {
-          ...f.params.ingressOpts,
-          abortSignal: entry.controller.signal,
-        },
-        runId,
-        abortController: entry.controller,
-        followupCompletion: owner,
-        onSettled,
-      });
-    };
-    return { f, owner, dispatch };
   }
 
   it.each(["command", "command-cleanup", "media"] as const)(
@@ -341,10 +299,9 @@ describe("Gateway dispatch run ownership", () => {
   );
 
   it.each(["same-session", "different-session", "removed-by-abort", "mutated-entry"] as const)(
-    "settles retained followup custody without releasing a %s registration",
+    "settles the original run without releasing a %s registration",
     async (replacement) => {
-      const { f, owner, dispatch } = createFollowupDispatch();
-      const { runId, sessionKey, context, entry } = f;
+      const { runId, sessionKey, context, entry, params } = createDispatch(true);
       const successor = {
         ...entry,
         controller: new AbortController(),
@@ -364,18 +321,8 @@ describe("Gateway dispatch run ownership", () => {
           },
         };
       });
-      let observed = false;
-      const reply = owner.take().then(
-        (result) => {
-          observed = true;
-          return { result };
-        },
-        (error: unknown) => {
-          observed = true;
-          return { error };
-        },
-      );
-      const completion = dispatch();
+      const { emitFinal } = params.io;
+      const completion = dispatchAgentRunFromGateway(params);
       try {
         const producer = entry.resolveTerminalProducer?.();
         expect(
@@ -397,23 +344,10 @@ describe("Gateway dispatch run ownership", () => {
         }
         finishCommand.resolve();
         await saving.promise;
-        expect(observed).toBe(false);
+        expect(emitFinal).not.toHaveBeenCalled();
         finishSave.resolve();
         await completion;
-        if (replacement === "same-session" || replacement === "mutated-entry") {
-          await expect(reply).resolves.toMatchObject({
-            error: expect.objectContaining({
-              message: expect.stringContaining("lost its Gateway registration"),
-            }),
-          });
-        } else {
-          await expect(reply).resolves.toMatchObject({
-            result:
-              replacement === "removed-by-abort"
-                ? { status: "error", stopReason: "rpc" }
-                : { status: "ok", replyText: "Original result" },
-          });
-        }
+        expect(emitFinal).toHaveBeenCalledOnce();
         if (replacement !== "removed-by-abort") {
           expect(mocks.clearAgentRunContext).not.toHaveBeenCalled();
           expect(context.chatAbortControllers.get(runId)).toBe(
@@ -434,8 +368,6 @@ describe("Gateway dispatch run ownership", () => {
         finishCommand.resolve();
         finishSave.resolve();
         await completion;
-        owner.close();
-        await reply;
       }
     },
   );
@@ -460,159 +392,6 @@ describe("Gateway dispatch run ownership", () => {
         ],
         expect.objectContaining({ error: String(failure) }),
       );
-    },
-  );
-  it("keeps one logical owner across yield and delivers only the admitted successor reply", async () => {
-    const { f, owner, dispatch } = createFollowupDispatch();
-    const settlementEntered = createDeferred();
-    const finishSettlement = createDeferred();
-    const finishExecution = vi.spyOn(owner, "finishExecution");
-    let predecessor: ReturnType<typeof dispatch> | undefined;
-    let successorDispatch: ReturnType<typeof dispatch> | undefined;
-    const entries: SubagentRunRecord[] = [
-      {
-        runId: "descendant",
-        childSessionKey: "agent:main:descendant",
-        requesterSessionKey: f.sessionKey,
-        requesterDisplayKey: f.sessionKey,
-        task: "descendant",
-        cleanup: "keep",
-        createdAt: 1,
-        execution: { status: "terminal" },
-        requesterSettleWake: {
-          status: "pending",
-          attemptCount: 0,
-          rearmGeneration: 1,
-          requesterYieldBatch: true,
-        },
-      },
-    ];
-    owner.promoteYield(f.runId, entries, 1);
-    try {
-      mocks.agentCommand.mockResolvedValueOnce({
-        payloads: [],
-        meta: { yielded: true, terminalReply: { disposition: "empty" } },
-      });
-      predecessor = dispatch(f.runId, f.entry, undefined, async () => {
-        settlementEntered.resolve();
-        await finishSettlement.promise;
-        return true;
-      });
-      await Promise.race([settlementEntered.promise, predecessor]);
-      expect(finishExecution).not.toHaveBeenCalled();
-      finishSettlement.resolve();
-      await predecessor;
-      expect(finishExecution).toHaveBeenCalledWith(f.runId);
-      const successor = owner.successor(entries, "exact-successor", vi.fn());
-      await owner.prepareSuccessor(successor);
-      owner.adopt(successor);
-      const successorEntry = {
-        ...f.entry,
-        controller: new AbortController(),
-        operationalRunInstance: { runId: successor.runId, instanceId: "successor-instance" },
-      };
-      f.context.chatAbortControllers.set(successor.runId, successorEntry);
-      mocks.agentCommand.mockImplementationOnce(async (opts) => {
-        await opts.onExecutionStarted?.();
-        return {
-          payloads: [{ text: "not canonical", mediaUrl: null }],
-          meta: { terminalReply: { disposition: "visible", text: "B_YIELD_DONE" } },
-        };
-      });
-      successorDispatch = dispatch(successor.runId, successorEntry);
-      await successorDispatch;
-      await expect(owner.take()).resolves.toMatchObject({
-        status: "ok",
-        replyText: "B_YIELD_DONE",
-        terminalReply: { disposition: "visible", text: "B_YIELD_DONE" },
-      });
-      expect(mocks.agentCommand).toHaveBeenCalledTimes(2);
-    } finally {
-      finishSettlement.resolve();
-      await Promise.allSettled([predecessor, successorDispatch]);
-      owner.close();
-    }
-  });
-
-  it.each([
-    {
-      name: "provider failure",
-      meta: { error: { kind: "incomplete_turn" as const, message: "provider failed" } },
-      status: "error",
-      stopReason: undefined,
-    },
-    {
-      name: "RPC cancellation",
-      meta: { aborted: true, stopReason: "rpc" },
-      status: "error",
-      stopReason: "rpc",
-    },
-    {
-      name: "timeout",
-      meta: { aborted: true, stopReason: "timeout" },
-      status: "timeout",
-      stopReason: "timeout",
-    },
-    {
-      name: "silent reply",
-      meta: { terminalReply: { disposition: "silent" as const } },
-      status: "ok",
-      stopReason: undefined,
-    },
-    {
-      name: "empty reply",
-      meta: { terminalReply: { disposition: "empty" as const } },
-      status: "ok",
-      stopReason: undefined,
-    },
-  ])(
-    "passes canonical $name rather than wire status to the completion owner",
-    async ({ meta, status, stopReason }) => {
-      const { owner, dispatch } = createFollowupDispatch();
-      mocks.agentCommand.mockResolvedValueOnce({
-        payloads: [{ text: "payload is not canonical", mediaUrl: null }],
-        meta,
-      });
-      try {
-        await dispatch();
-        const result = await owner.take();
-        expect(result).toMatchObject({ status, ...(stopReason ? { stopReason } : {}) });
-        if (meta.terminalReply) {
-          expect(result?.terminalReply).toEqual(meta.terminalReply);
-          expect(result?.replyText).toBeUndefined();
-        }
-      } finally {
-        owner.close();
-      }
-    },
-  );
-
-  it.each(["replaced", "denied"] as const)(
-    "settles an admitted followup without invoking it when activation is %s",
-    async (outcome) => {
-      const { f, owner, dispatch } = createFollowupDispatch();
-      const successor = { ...f.entry, controller: new AbortController() };
-      if (outcome === "replaced") {
-        f.context.chatAbortControllers.set(f.runId, successor);
-      }
-      try {
-        if (outcome === "replaced") {
-          await expect(dispatch()).rejects.toThrow("lost its Gateway registration");
-          expect(f.context.chatAbortControllers.get(f.runId)).toBe(successor);
-          await expect(owner.take()).rejects.toThrow("lost its Gateway registration");
-        } else {
-          await dispatch(undefined, undefined, () => {
-            throw new Error("activation denied");
-          });
-          await expect(owner.take()).resolves.toMatchObject({
-            status: "error",
-            error: "activation denied",
-          });
-        }
-        expect(mocks.agentCommand).not.toHaveBeenCalled();
-      } finally {
-        owner.close();
-      }
     },
   );
 });

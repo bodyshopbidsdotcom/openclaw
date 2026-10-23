@@ -13,10 +13,6 @@ import {
   normalizeMessageChannel,
 } from "../../../utils/message-channel.js";
 import { resolveSubagentRequesterAgentId } from "../../subagent-requester-owner.js";
-import {
-  getFollowupForCohort,
-  withFollowupSuccessor,
-} from "../completion/session-followup-completion.js";
 import { withSubagentProgressDraft } from "../registry/subagent-progress-draft.js";
 import { isQuietSubagentRestartContinuation } from "../registry/subagent-recovery-state.js";
 import { subagentRuns } from "../registry/subagent-registry-memory.js";
@@ -290,20 +286,13 @@ export async function maybeWakeRequesterAfterAllChildrenSettled(
     if (await retireReplacedStore()) {
       return false;
     }
-    const followup = pauseNotice ? undefined : getFollowupForCohort(settledBatch);
     const getRequesterRun = () =>
-      followup
-        ? undefined
-        : (getLatestLiveSubagentRunByChildSessionKey(
-            requesterSessionKey,
-            (entry) => entry.pauseReason === "sessions_yield",
-            requesterAgentId,
-          ) ??
-          getLatestLiveSubagentRunByChildSessionKey(
-            requesterSessionKey,
-            undefined,
-            requesterAgentId,
-          ));
+      getLatestLiveSubagentRunByChildSessionKey(
+        requesterSessionKey,
+        (entry) => entry.pauseReason === "sessions_yield",
+        requesterAgentId,
+      ) ??
+      getLatestLiveSubagentRunByChildSessionKey(requesterSessionKey, undefined, requesterAgentId);
     const requesterRun = getRequesterRun();
     const isRequesterRunCurrent = captureRequesterRunOwner(requesterRun);
     const isBatchDeliveryClosed = () => {
@@ -553,14 +542,6 @@ export async function maybeWakeRequesterAfterAllChildrenSettled(
       if (!sourceReceiptAdmission.isRequesterCurrent()) {
         return false;
       }
-      if (followup) {
-        try {
-          followup.assertCurrent();
-          return true;
-        } catch {
-          return false;
-        }
-      }
       return isRequesterRunCurrent(getRequesterRun(), directIdempotencyKey);
     };
     const isSourceSessionEffectsAllowed = () =>
@@ -645,18 +626,7 @@ export async function maybeWakeRequesterAfterAllChildrenSettled(
               }),
           ),
         );
-      delivery = await withSubagentProgressDraft(settledBatch, directIdempotencyKey, () =>
-        followup
-          ? withFollowupSuccessor(
-              followup.successor(settledBatch, directIdempotencyKey, () => {
-                if (!isSourceSessionEffectsAllowed()) {
-                  throw new Error("Followup completion cohort changed.");
-                }
-              }),
-              dispatch,
-            )
-          : dispatch(),
-      );
+      delivery = await withSubagentProgressDraft(settledBatch, directIdempotencyKey, dispatch);
     } catch (error) {
       if (await settleRevokedBatch()) {
         return false;

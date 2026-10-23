@@ -271,8 +271,6 @@ export type SubagentRegistrationScope = {
 };
 
 export type RegisterSubagentRunOptions = {
-  /** An accepted dispatch replay retains its original completion owner and waiter. */
-  acceptedRunReplay?: true;
   assertCurrent?: () => void;
   assertPublicationCurrent?: () => void;
   retainOwnership?: (scope: SubagentRegistrationScope) => void;

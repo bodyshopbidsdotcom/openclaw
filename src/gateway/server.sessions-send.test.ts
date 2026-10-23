@@ -69,9 +69,11 @@ function expectSessionsSendDetails(
   result: { details?: unknown },
   expected: { reply: string; sessionKey: string },
 ): void {
+  // The reply returns inline; nothing announces it back afterward.
   expect(result.details, JSON.stringify(result.details)).toMatchObject({
     status: "ok",
     ...expected,
+    delivery: { status: "skipped" },
   });
 }
 
@@ -203,7 +205,7 @@ beforeEach(async () => {
   await prepareGatewayReplyRuntimeForTest();
 });
 
-// Detached replies retain their selected store until the owner has settled.
+// Accepted target runs retain their selected store until the owner has settled.
 afterEach(
   async () => {
     await waitForGatewayActiveWork(SESSION_SEND_E2E_TIMEOUT_MS * 3);
@@ -270,6 +272,7 @@ describe("sessions_send gateway loopback", () => {
         resolveText: () => "pong",
       });
     });
+    spy.mockClear();
 
     const tool = getSessionsSendTool();
 
@@ -288,7 +291,9 @@ describe("sessions_send gateway loopback", () => {
     expect(result.details).toMatchObject({ runId: firstCall?.runId });
     expect(firstCall?.userTurnTranscriptRecorder?.hasPersisted()).toBe(true);
 
-    expect(spy).toHaveBeenCalledOnce();
+    // No detached reply-back or announce turn follows the inline reply.
+    await waitForGatewayActiveWork(SESSION_SEND_E2E_TIMEOUT_MS);
+    expect(spy).toHaveBeenCalledTimes(1);
     const { callGateway } = await import("./call.js");
     const history = await callGateway<{ messages?: unknown[] }>({
       method: "chat.history",
@@ -308,6 +313,12 @@ describe("sessions_send gateway loopback", () => {
         }),
       }),
     );
+    // The target keeps its own final reply in its session.
+    expect
+      .soft(history.messages)
+      .toContainEqual(
+        expect.objectContaining({ role: "assistant", content: [{ type: "text", text: "pong" }] }),
+      );
   });
 
   it(

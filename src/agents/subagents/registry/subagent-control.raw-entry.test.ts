@@ -39,7 +39,29 @@ const fixture = useSubagentControlFixture();
 const manager = vi.mocked(createSubagentRunManager).mock.results[0]!.value;
 
 // sessions.create composition is proven separately. These rows retain its
-// spawnedBy/spawnDepth contract; the actual send tool must create the run record.
+// spawnedBy/spawnDepth contract. The child run record comes from its spawn
+// owner; a sessions_send followup starts a child turn but registers no run.
+function registerRawChild(params: {
+  runId: string;
+  agentId: string;
+  parentKey: string;
+  turn: string;
+}) {
+  return registerSubagentRun({
+    runId: params.runId,
+    childSessionKey: "global",
+    childAgentId: params.agentId,
+    requesterSessionKey: params.parentKey,
+    requesterDisplayKey: params.parentKey,
+    requesterAgentId: params.agentId,
+    requesterTurnRunId: params.turn,
+    task: `${params.agentId} child task`,
+    cleanup: "keep",
+    expectsCompletionMessage: true,
+    completionTarget: "parent",
+  });
+}
+
 it("cancelling a watched main/global child preserves the other agent's work", async () => {
   const owner = "main";
   const foreignAgent = "research";
@@ -85,6 +107,12 @@ it("cancelling a watched main/global child preserves the other agent's work", as
     sessionKey: "global",
     defaultSessionId: foreignId,
   });
+  await registerRawChild({
+    runId: "spawned-global-run",
+    agentId: owner,
+    parentKey,
+    turn: "parent-turn",
+  });
   const dispatched: Record<string, unknown>[] = [];
   const callGateway: AgentToolGatewayRequestCaller = async (request) => {
     if (request.method !== "agent") {
@@ -110,7 +138,8 @@ it("cancelling a watched main/global child preserves the other agent's work", as
   expect(sent.details).toMatchObject({ status: "accepted", watched: true });
   expect(dispatched).toHaveLength(1);
   expect(dispatched[0]).toMatchObject({ agentId: owner, sessionKey: "global" });
-  expect.soft(getSubagentRunByRunId("watched-global-run")).toMatchObject({
+  expect.soft(getSubagentRunByRunId("watched-global-run")).toBeUndefined();
+  expect.soft(getSubagentRunByRunId("spawned-global-run")).toMatchObject({
     childSessionKey: "global",
     childAgentId: owner,
     requesterSessionKey: parentKey,
@@ -157,7 +186,7 @@ it("cancelling a watched main/global child preserves the other agent's work", as
       config: cfg,
       agentId: owner,
       agentSessionKey: parentKey,
-    }).execute("cancel", { action: "cancel", runId: "watched-global-run" });
+    }).execute("cancel", { action: "cancel", runId: "spawned-global-run" });
     expect(cancelled.details).toMatchObject({ found: true, killed: true });
     expect(interruptChild).toHaveBeenCalledOnce();
     expect(
@@ -209,7 +238,7 @@ async function prepareWatchedRawChildren() {
     }
     request.assertDispatchCurrent?.();
     const params = request.params as { agentId: string };
-    return { runId: `${params.agentId}-${++sequence}`, status: "accepted" } as never;
+    return { runId: `${params.agentId}-send-${++sequence}`, status: "accepted" } as never;
   };
   const children = new Map<string, { storePath: string; parentKey: string }>();
   for (const agentId of ["main", "research"]) {
@@ -248,9 +277,11 @@ async function prepareWatchedRawChildren() {
       watch: true,
       timeoutSeconds: 0,
     });
-  expect((await send("main", "main-turn")).details).toMatchObject({ status: "accepted" });
-  expect((await send("research", "research-turn")).details).toMatchObject({ status: "accepted" });
-  return { cfg, children, send };
+  const register = (agentId: string, runId: string, turn: string) =>
+    registerRawChild({ runId, agentId, parentKey: children.get(agentId)!.parentKey, turn });
+  await register("main", "main-1", "main-turn");
+  await register("research", "research-2", "research-turn");
+  return { cfg, children, send, register };
 }
 
 it.each([
@@ -321,20 +352,24 @@ it.each([
 );
 
 it("numbers watched raw children independently and keeps their completion owner", async () => {
-  const { children, send } = await prepareWatchedRawChildren();
+  const { send, register } = await prepareWatchedRawChildren();
   expect.soft(getSubagentRunByRunId("main-1")?.generation).toBe(1);
   expect.soft(getSubagentRunByRunId("research-2")?.generation).toBe(1);
-  const { storePath } = children.get("main")!;
-  const scope = { agentId: "main", storePath, sessionKey: "global" };
-  const entry = loadSessionEntry(scope)!;
-  // Retained completion custody also permits followups after the spawn link changes.
-  await replaceSessionEntry(scope, { ...entry, spawnedBy: "agent:main:dashboard:other" });
-  expect((await send("main", "main-next-turn")).details).toMatchObject({ status: "accepted" });
+  await register("main", "main-3", "main-next-turn");
   expect(getSubagentRunByRunId("main-3")).toMatchObject({
     childAgentId: "main",
     generation: 2,
     requesterTurnRunId: "main-next-turn",
   });
+  // A watched followup starts a child turn without registering or moving a completion.
+  expect((await send("main", "main-send-turn")).details).toMatchObject({
+    runId: "main-send-1",
+    status: "accepted",
+    delivery: { status: "skipped" },
+    watched: true,
+  });
+  expect(getSubagentRunByRunId("main-send-1")).toBeUndefined();
+  expect(getSubagentRunByRunId("main-3")?.requesterTurnRunId).toBe("main-next-turn");
   expect(getSubagentRunByRunId("research-2")).toMatchObject({
     generation: 1,
     requesterTurnRunId: "research-turn",
@@ -348,8 +383,10 @@ it("steers its watched raw child while another agent has a newer row", async () 
   const handle = createEmbeddedRunHandle({ runId: "main-1", queueMessage });
   setActiveEmbeddedRun("main-global", handle, "global", undefined, "main");
   try {
+    // An unclaimable completion returns an error, so acceptance proves the claim.
     expect((await send("main", "main-turn", "steer")).details).toMatchObject({
       status: "accepted",
+      delivery: { status: "skipped" },
     });
     expect(queueMessage).toHaveBeenCalledOnce();
     expect(getSubagentRunByRunId("main-1")?.requesterTurnRunId).toBe("main-turn");
@@ -370,8 +407,8 @@ it("cancels its selected raw child while another agent has a newer watched row",
   expect(getSubagentRunByRunId("research-2")?.execution.endedAt).toBeUndefined();
 });
 
-it("keeps a watched registration current while the other raw owner commits", async () => {
-  const { send } = await prepareWatchedRawChildren();
+it("numbers a raw child while the other raw owner's registration commits", async () => {
+  const { register } = await prepareWatchedRawChildren();
   const entered = createDeferred();
   const release = createDeferred();
   fixture.worker.mockImplementation((context, operation, options) =>
@@ -393,20 +430,18 @@ it("keeps a watched registration current while the other raw owner commits", asy
       options,
     ),
   );
-  const pending = send("main", "main-concurrent-turn");
+  const pending = register("main", "main-3", "main-concurrent-turn");
   try {
     await awaitGateBeforeSettlement(
       entered.promise,
       pending,
-      "Watched registration settled before its registry write",
+      "Raw child registration settled before its registry write",
     );
-    expect((await send("research", "research-concurrent-turn")).details).toMatchObject({
-      status: "accepted",
-    });
+    await register("research", "research-4", "research-concurrent-turn");
   } finally {
     release.resolve();
   }
-  expect((await pending).details).toMatchObject({ status: "accepted" });
+  await pending;
   expect(getSubagentRunByRunId("main-3")).toMatchObject({
     generation: 2,
     requesterTurnRunId: "main-concurrent-turn",

@@ -7,7 +7,6 @@ import {
 } from "../../../plugins/runtime/gateway-request-scope.js";
 import { parseAgentSessionKey } from "../../../routing/session-key.js";
 import { createDeferredCore } from "../../../shared/deferred.js";
-import { transferFollowupCohort } from "../completion/session-followup-cohort.js";
 import { matchesSubagentChildSessionOwner } from "./subagent-child-owner-match.js";
 import { projectSubagentRunForSessionList } from "./subagent-delivery-state.js";
 import { SUBAGENT_ENDED_REASON_KILLED } from "./subagent-lifecycle-events.js";
@@ -301,7 +300,6 @@ class SubagentRunMap extends Map<string, SubagentRunRecord> {
 
   /** Committed replacement transfers custody without reviving a retired source. */
   transferCompletionAuthority(previous: SubagentRunRecord, next: SubagentRunRecord): void {
-    transferFollowupCohort(previous, next);
     for (const entries of [this.retiredCompletionEntries, this.operatorCompletionEntries]) {
       if (entries.has(getSubagentRunRuntimeKey(previous))) {
         entries.add(getSubagentRunRuntimeKey(next));

@@ -97,7 +97,7 @@ export async function resumeSessionsSendTask(params: {
       targetAgentId: params.targetAgentId,
       targetSessionKey: params.sessionKey,
     });
-    // No agent.wait, watch registration, or A2A flow may compete with task completion.
+    // No agent.wait or watch registration may compete with task completion.
     return jsonResult({
       status: "accepted",
       mode: "resume",

@@ -181,7 +181,6 @@ describe("registered completion source custody", () => {
             registerSubagentRun(
               registration(runId, { gatewayContextResolver: resolveGatewayContext }),
               {
-                acceptedRunReplay: true,
                 assertCurrent: () => {
                   if (!current) {
                     throw new Error("requester retired before registry commit");
@@ -247,16 +246,9 @@ describe("registered completion source custody", () => {
                 params: expect.objectContaining({ runId }),
               }),
             );
-            const accepted = subagentRuns.get(runId);
-            expect(accepted?.childAgentId).toBeUndefined();
-            await registerSubagentRun(registration(runId, { childAgentId: "MAIN" }), {
-              acceptedRunReplay: true,
-            });
-            expect(subagentRuns.get(runId)).toBe(accepted);
+            expect(subagentRuns.get(runId)?.childAgentId).toBeUndefined();
             await expect(
-              registerSubagentRun(registration(runId, { childAgentId: "research" }), {
-                acceptedRunReplay: true,
-              }),
+              registerSubagentRun(registration("mismatched-child", { childAgentId: "research" })),
             ).rejects.toThrow("Subagent registration child agent disagrees with its session key.");
             expect(callGateway).toHaveBeenCalledTimes(1);
           }
@@ -557,29 +549,6 @@ describe("registered completion source custody", () => {
   );
 
   registerRequesterCompletionCustodyTests({ registration, updateRun });
-
-  it("retains raw child ownership, including unknown legacy ownership, on registration replay", async () => {
-    await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
-      const originalConfig = { session: { store: state.path("original.sqlite") } };
-      for (const childAgentId of [undefined, "research"]) {
-        vi.mocked(config.getRuntimeConfig).mockReturnValue(originalConfig);
-        const runId = childAgentId ?? "legacy";
-        const params = registration(runId, { childSessionKey: "global", childAgentId });
-        await registerSubagentRun(params);
-        expect(subagentRuns.get(runId)?.childAgentId).toBe(childAgentId);
-        vi.mocked(config.getRuntimeConfig).mockReturnValue({
-          session: { store: state.path("replacement.sqlite") },
-        });
-        await registerSubagentRun(
-          { ...params, childAgentId: "main" },
-          {
-            acceptedRunReplay: true,
-          },
-        );
-        expect(subagentRuns.get(runId)?.childAgentId).toBe(childAgentId);
-      }
-    });
-  });
 
   it.each([
     "admission",
