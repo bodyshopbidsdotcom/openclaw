@@ -52,11 +52,6 @@ import { refusePendingInputCommit } from "./pending-input-commit.test-support.js
 import { dispatchGatewayMethodInProcess } from "./server-plugin-in-process-dispatch.js";
 import { startGatewayServerHarness, type GatewayServerHarness } from "./server.e2e-ws-harness.js";
 import { holdMetadataThroughSubagentStop } from "./server.private-completion.metadata-overlap.test-support.js";
-import {
-  createPrivateCompletionRequest,
-  readPrivateCompletionRecorder,
-  registerSessionsSendPrivateCompletionTests,
-} from "./server.private-completion.sessions-send.test-support.js";
 import { loadSessionEntryAsync } from "./session-entry-load.test-support.js";
 import * as lifecycleState from "./session-lifecycle-state.js";
 import { createPreparedLifecycleWriteTracker } from "./session-lifecycle-state.test-support.js";
@@ -119,8 +114,19 @@ describe("private subagent completion processing receipts", () => {
       .db.prepare("SELECT * FROM session_pending_inputs WHERE session_id = ?")
       .all(sessionId);
   const transcript = () => sessionAccessor.loadTranscriptEventsSync(scope());
-  const request = (message?: string) =>
-    createPrivateCompletionRequest({ sessionKey, sessionId, runId, message });
+  const request = (message = "Synthetic private child marker") => ({
+    sessionKey,
+    expectedExistingSessionId: sessionId,
+    idempotencyKey: runId,
+    message,
+    deliver: false,
+    sourceReplyDeliveryMode: "automatic",
+    inputProvenance: {
+      kind: "inter_session",
+      sourceTool: "subagent_announce",
+      sourceSessionKey: "agent:main:subagent:synthetic-child",
+    },
+  });
   const dispatch = (message?: string, onAccepted?: () => void) =>
     dispatchGatewayMethodInProcess<Record<string, unknown>>("agent", request(message), {
       privateCompletion: true,
@@ -138,19 +144,16 @@ describe("private subagent completion processing receipts", () => {
     await prepareGatewayReplyRuntimeForTest({ force: true });
     expect(kernel.gatewayRequestContext.dedupe).not.toBe(previousDedupe);
   }
-  const recorder = (input: unknown) => readPrivateCompletionRecorder(input, sessionId);
-
-  registerSessionsSendPrivateCompletionTests(() => ({
-    context: kernel.gatewayRequestContext,
-    sequence,
-    sessionKey,
-    sessionId,
-    completions,
-    pending,
-    transcript,
-    recorder,
-    agentCommandMock,
-  }));
+  function recorder(input: unknown) {
+    const command = input as AgentCommandOpts;
+    expect(command.deliver).toBe(false);
+    expect(command.privateCompletion).toBe(true);
+    expect(command.sessionId).toBe(sessionId);
+    return expectDefined(
+      command.userTurnTranscriptRecorder,
+      "Expected real private input recorder",
+    );
+  }
 
   async function processPrivateInput(input: unknown) {
     await recorder(input).persistApproved();

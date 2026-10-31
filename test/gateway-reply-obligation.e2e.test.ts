@@ -1,4 +1,4 @@
-// Real Gateway admission, in-process sessions_send callback, and HTTP provider completion.
+// Real Gateway admission, in-process sessions_send, and HTTP provider completion.
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
@@ -23,25 +23,22 @@ import { runQaGatewayFixture } from "./helpers/qa-gateway-cleanup.js";
 const MODEL_REF = "reply-obligation/reply-obligation";
 const REQUIRED_REQUEST = "REQUIRED_EMPTY_CONTROL";
 const REQUIRED_RECOVERED = "REQUIRED_RECOVERED";
-const variants = ["empty", "no-reply"] as const;
-type Variant = (typeof variants)[number];
 type ObservedEvent = { event?: string; payload?: unknown };
 let instance: OpenClawTestInstance | undefined;
 let fixture: Awaited<ReturnType<typeof startFixture>> | undefined;
 
-function createScenario(variant: Variant) {
+function createScenario() {
   return {
-    variant,
-    parentKey: "agent:main:reply-obligation-" + variant,
-    peerKey: "agent:main:reply-obligation-peer-" + variant,
+    parentKey: "agent:main:reply-obligation",
+    peerKey: "agent:main:reply-obligation-peer",
     parentRunId: randomUUID(),
-    parentPrompt: "START_PARENT_" + variant,
-    parentFinal: "PARENT_FINAL_" + variant,
-    peerPrompt: "PEER_WORK_" + variant,
-    peerResult: "PEER_RESULT_" + variant,
+    parentPrompt: "START_PARENT",
+    parentFinal: "PARENT_FINAL",
+    peerPrompt: "PEER_WORK",
+    peerResult: "PEER_RESULT",
     peerStarted: createDeferred(),
     releasePeer: createDeferred(),
-    callbackTerminal: createDeferred<Record<string, unknown>>(),
+    peerRunId: undefined as string | undefined,
     parentRequests: 0,
     peerRequests: 0,
     callbackRequests: 0,
@@ -62,11 +59,11 @@ afterEach(async () => {
 
 describe("Gateway trusted reply obligations", () => {
   it(
-    "silently settles late peer results without retrying, but recovers a required empty reply",
+    "keeps a late peer result in the peer session, and recovers a required empty reply",
     { timeout: 180_000 },
     async ({ signal }) => {
-      const scenarios = variants.map(createScenario);
-      const activeFixture = await startFixture(scenarios);
+      const scenario = createScenario();
+      const activeFixture = await startFixture(scenario);
       fixture = activeFixture;
       const profile = "reply-obligation-" + randomUUID();
       const gateway = await createOpenClawTestInstance({
@@ -107,98 +104,69 @@ describe("Gateway trusted reply obligations", () => {
         signal,
         onEvent: (event) => {
           events.push(event);
-          const payload = asOptionalRecord(event.payload);
-          const data = asOptionalRecord(payload?.data);
-          if (
-            event.event !== "agent" ||
-            payload?.stream !== "lifecycle" ||
-            (data?.phase !== "end" && data?.phase !== "error")
-          ) {
-            return;
-          }
-          const scenario = scenarios.find(
-            (candidate) =>
-              payload.sessionKey === candidate.parentKey && payload.runId !== candidate.parentRunId,
-          );
-          if (scenario) {
-            scenario.callbackTerminal.resolve(payload);
-          }
         },
       });
       try {
         await client.request("sessions.subscribe", {});
-        for (const scenario of scenarios) {
-          await client.request("sessions.create", { key: scenario.peerKey, agentId: "main" });
-          await client.request("sessions.create", { key: scenario.parentKey, agentId: "main" });
-          await client.request("sessions.messages.subscribe", {
-            key: scenario.parentKey,
-            subscriptionId: "reply-obligation-" + scenario.variant,
-          });
-          const parent = await client.request(
-            "agent",
-            {
-              sessionKey: scenario.parentKey,
-              message: scenario.parentPrompt,
-              channel: "webchat",
-              deliver: false,
-              idempotencyKey: scenario.parentRunId,
-            },
-            { expectFinal: true, timeoutMs: 60_000 },
-          );
-          expect(parent, gateway.logs()).toMatchObject({ status: "ok" });
-          await withinTest(scenario.peerStarted.promise, signal);
-          expect(scenario.callbackRequests).toBe(0);
-          const before = await client.request<{ messages: unknown[] }>("chat.history", {
+        await client.request("sessions.create", { key: scenario.peerKey, agentId: "main" });
+        await client.request("sessions.create", { key: scenario.parentKey, agentId: "main" });
+        await client.request("sessions.messages.subscribe", {
+          key: scenario.parentKey,
+          subscriptionId: "reply-obligation",
+        });
+        const parent = await client.request(
+          "agent",
+          {
             sessionKey: scenario.parentKey,
-            limit: 100,
-          });
-          expect(modelReplyTexts(before.messages)).toEqual([scenario.parentFinal]);
+            message: scenario.parentPrompt,
+            channel: "webchat",
+            deliver: false,
+            idempotencyKey: scenario.parentRunId,
+          },
+          { expectFinal: true, timeoutMs: 60_000 },
+        );
+        expect(parent, gateway.logs()).toMatchObject({ status: "ok" });
+        await withinTest(scenario.peerStarted.promise, signal);
+        const before = await client.request<{ messages: unknown[] }>("chat.history", {
+          sessionKey: scenario.parentKey,
+          limit: 100,
+        });
+        expect(modelReplyTexts(before.messages)).toEqual([scenario.parentFinal]);
 
-          // Release only after the original final is committed and publicly readable.
-          scenario.releasePeer.resolve();
-          const terminal = await withinTest(scenario.callbackTerminal.promise, signal);
-          expect(terminal.data, gateway.logs()).toMatchObject({ phase: "end" });
-          expect(asOptionalRecord(terminal.data)?.error).toBeUndefined();
-          const settled = await client.request(
-            "agent.wait",
-            { runId: terminal.runId, timeoutMs: 10_000 },
-            { timeoutMs: 15_000 },
-          );
-          expect(settled, gateway.logs()).toMatchObject({ status: "ok" });
-          expect(asOptionalRecord(settled)?.error).toBeUndefined();
-          const after = await client.request<{ messages: unknown[] }>("chat.history", {
-            sessionKey: scenario.parentKey,
-            limit: 100,
-          });
-          expect(modelReplyTexts(after.messages)).toEqual([scenario.parentFinal]);
-          const forwarded = interSessionInputs(after.messages);
-          expect(forwarded).toHaveLength(1);
-          expect(contentText(forwarded[0]?.content).trim()).toBe(scenario.peerResult);
-          expect(forwarded[0]).toMatchObject({
-            role: "assistant",
-            provenance: {
-              kind: "inter_session",
-              sourceTool: "sessions_send",
-              sourceSessionKey: scenario.peerKey,
-            },
-            senderSession: { agentId: "main", sessionKey: scenario.peerKey },
-            senderLabel: "Forwarded from main",
-          });
-          expect(scenario.parentRequests).toBe(2);
-          expect(scenario.peerRequests).toBe(1);
-          expect(scenario.callbackRequests).toBe(1);
-          expect(
-            events.filter((event) => {
-              const payload = asOptionalRecord(event.payload);
-              const data = asOptionalRecord(payload?.data);
-              return (
-                payload?.sessionKey === scenario.parentKey &&
-                ((event.event === "chat" && payload.state === "error") ||
-                  (event.event === "agent" && data?.phase === "error"))
-              );
-            }),
-          ).toEqual([]);
-        }
+        // Release only after the original final is committed and publicly readable.
+        scenario.releasePeer.resolve();
+        expect(scenario.peerRunId).toBeTruthy();
+        const settled = await client.request(
+          "agent.wait",
+          { runId: scenario.peerRunId, timeoutMs: 30_000 },
+          { timeoutMs: 35_000 },
+        );
+        expect(settled, gateway.logs()).toMatchObject({ status: "ok" });
+        const peerHistory = await client.request<{ messages: unknown[] }>("chat.history", {
+          sessionKey: scenario.peerKey,
+          limit: 100,
+        });
+        // The target records its own answer; nothing reports it back to the parent.
+        expect(modelReplyTexts(peerHistory.messages)).toEqual([scenario.peerResult]);
+        const after = await client.request<{ messages: unknown[] }>("chat.history", {
+          sessionKey: scenario.parentKey,
+          limit: 100,
+        });
+        expect(modelReplyTexts(after.messages)).toEqual([scenario.parentFinal]);
+        expect(interSessionInputs(after.messages)).toEqual([]);
+        expect(scenario.parentRequests).toBe(2);
+        expect(scenario.peerRequests).toBe(1);
+        expect(
+          events.filter((event) => {
+            const payload = asOptionalRecord(event.payload);
+            const data = asOptionalRecord(payload?.data);
+            return (
+              payload?.sessionKey === scenario.parentKey &&
+              ((event.event === "chat" && payload.state === "error") ||
+                (event.event === "agent" && data?.phase === "error"))
+            );
+          }),
+        ).toEqual([]);
 
         const requiredKey = "agent:main:reply-obligation-required";
         const required = await client.request(
@@ -228,10 +196,11 @@ describe("Gateway trusted reply obligations", () => {
           role: "assistant",
           provenance: { kind: "inter_session", sourceTool: "sessions_send" },
         });
+        // Checked last so a late callback to the parent has had time to surface.
+        expect(scenario.callbackRequests).toBe(0);
         expect(activeFixture.failures).toEqual([]);
-        expect(gateway.logs()).not.toContain("sessions_send reply flow failed");
         console.log(
-          "[reply-obligation-proof] Late peer empty/NO_REPLY completions settled once; a required empty request recovered",
+          "[reply-obligation-proof] A late peer result stayed in the peer session; a required empty request recovered",
         );
       } finally {
         activeFixture.releaseAll();
@@ -321,7 +290,7 @@ function createConfig(url: string): OpenClawConfig {
   };
 }
 
-async function startFixture(scenarios: Scenario[]) {
+async function startFixture(scenario: Scenario) {
   const failures: string[] = [];
   let sequence = 0;
   let requiredRequests = 0;
@@ -368,34 +337,30 @@ async function startFixture(scenarios: Scenario[]) {
       final(requiredRequests === 1 ? "" : REQUIRED_RECOVERED);
       return;
     }
-    const scenario = scenarios.find((candidate) =>
-      userTexts.some((text) => text.includes(candidate.peerResult)),
-    );
-    if (scenario) {
+    if (userTexts.some((text) => text.includes(scenario.peerResult))) {
       scenario.callbackRequests += 1;
-      final(scenario.variant === "empty" ? "" : "NO_REPLY");
-      return;
+      throw new Error("A late peer result was reported back to its requester");
     }
-    const peer = scenarios.find((candidate) => userText.includes(candidate.peerPrompt));
-    if (peer) {
-      if (++peer.peerRequests !== 1) {
+    if (userText.includes(scenario.peerPrompt)) {
+      if (++scenario.peerRequests !== 1) {
         throw new Error("Peer work was repeated");
       }
-      peer.peerStarted.resolve();
-      await peer.releasePeer.promise;
-      final(peer.peerResult);
+      scenario.peerStarted.resolve();
+      await scenario.releasePeer.promise;
+      final(scenario.peerResult);
       return;
     }
-    const parent = scenarios.find((candidate) => userText.includes(candidate.parentPrompt));
+    const parent = userText.includes(scenario.parentPrompt) ? scenario : undefined;
     if (!parent || ++parent.parentRequests > 2) {
       throw new Error("Unexpected provider turn outside the finite reply-obligation scenario");
     }
     if (parent.parentRequests === 2) {
       const output = input.findLast((item) => item?.type === "function_call_output");
       const serialized = JSON.stringify(output?.output);
-      if (!serialized?.includes("accepted") || !serialized.includes("pending")) {
-        throw new Error("Real sessions_send did not accept delayed peer delivery");
+      if (!serialized?.includes("accepted") || !serialized.includes("skipped")) {
+        throw new Error("Real sessions_send did not accept the peer send without later delivery");
       }
+      parent.peerRunId = serialized.match(/\\?"runId\\?":\s*\\?"([^"\\]+)/)?.[1];
       final(parent.parentFinal);
       return;
     }
@@ -439,11 +404,7 @@ async function startFixture(scenarios: Scenario[]) {
     url: "http://127.0.0.1:" + reserved.claim.port,
     failures,
     requiredRequests: () => requiredRequests,
-    releaseAll: () => {
-      for (const scenario of scenarios) {
-        scenario.releasePeer.resolve();
-      }
-    },
+    releaseAll: () => scenario.releasePeer.resolve(),
     close: () =>
       runQaGatewayFixture(
         async () => {

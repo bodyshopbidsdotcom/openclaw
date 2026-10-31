@@ -10,7 +10,6 @@ import {
 import { parseAgentSessionKey } from "../../../routing/session-key.js";
 import { captureExecRequestCancellation } from "../../bash-process-control.js";
 import { resolveActiveEmbeddedRunOwnerByRunId } from "../../embedded-agent-runner/runs.js";
-import { retireRequesterFollowupAuthority } from "../requester-cron-authority.js";
 import {
   resolveSubagentChildAgentId,
   resolveSubagentChildAuthority,
@@ -106,7 +105,6 @@ export function captureSubagentExecution(params: {
 /** Retire execution authority while its raw owner still supplies cleanup observation. */
 export function retireSubagentGatewayBinding(observed: SubagentRunRecord): void {
   const entry = getCurrentSubagentRunOwner(subagentRuns, observed) ?? observed;
-  retireRequesterFollowupAuthority(entry);
   const key = getSubagentRunRuntimeKey(entry);
   const resolver = getGatewayContextResolver(entry);
   try {

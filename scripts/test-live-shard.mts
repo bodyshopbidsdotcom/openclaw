@@ -63,10 +63,6 @@ const OPTIONAL_LIVE_SHARD_FILE_ENVS = new Map([
     ["OPENCLAW_LIVE_SUBAGENT_E2E"],
   ],
   [
-    "src/agents/subagents/announce/subagent-followup-yield.live.test.ts",
-    ["OPENCLAW_LIVE_SUBAGENT_E2E"],
-  ],
-  [
     "src/agents/subagents/announce/subagent-late-reply.live.test.ts",
     ["OPENCLAW_LIVE_SUBAGENT_STRESS"],
   ],
@@ -78,7 +74,6 @@ const OPTIONAL_LIVE_SHARD_FILE_ENVS = new Map([
     "src/agents/subagents/announce/subagent-yield-resume.live.test.ts",
     ["OPENCLAW_LIVE_SUBAGENT_STRESS"],
   ],
-  ["src/agents/tools/sessions-send-peer.live.test.ts", ["OPENCLAW_LIVE_SUBAGENT_STRESS"]],
   ["src/agents/tools/image-tool.ollama.live.test.ts", ["OPENCLAW_LIVE_OLLAMA_IMAGE"]],
   ["src/agents/tools/image-tool.providers.live.test.ts", ["OPENCLAW_LIVE_IMAGE_TOOL_TEST"]],
   ["extensions/openai/realtime-meeting.live.test.ts", ["OPENCLAW_LIVE_GPT_LIVE"]],
