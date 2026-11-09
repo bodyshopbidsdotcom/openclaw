@@ -84,9 +84,11 @@ The completion owner also selects whether the successor owes another reply.
 Gateway admission carries that choice into execution without deriving it again
 from the internal channel or private-delivery mode. Optional result processing
 can finish silently when there is no more work or new answer; an outstanding
-required final still cannot. A peer’s returned `sessions_send` result likewise
-need not generate an acknowledgment. These internal choices are not public RPC
-options, and an unrelated earlier answer never discharges a new request.
+required final still cannot, unless a top-level requester already delivered it
+through `sessions_send` or the `message` tool and ends with exactly `NO_REPLY`.
+A peer’s returned `sessions_send` result likewise need not generate an
+acknowledgment. These internal choices are not public RPC options, and an
+unrelated earlier answer never discharges a new request.
 
 An explicit yield batch must be eligible at any requester depth. The ordinary
 nested-wave exclusion remains: nested runs without a yielded batch use the

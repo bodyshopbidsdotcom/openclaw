@@ -79,6 +79,18 @@ describe("yielded private settle outcomes", () => {
       expected: { delivered: false, reason: "visible_reply_missing" },
     },
     {
+      name: "public exact silent final",
+      public: true,
+      response: {
+        status: "ok",
+        result: {
+          payloads: [],
+          meta: { finalAssistantRawText: "NO_REPLY", terminalReply: { disposition: "silent" } },
+        },
+      },
+      expected: { delivered: true },
+    },
+    {
       name: "failed silence",
       response: {
         status: "ok",
@@ -214,9 +226,9 @@ describe("yielded private settle outcomes", () => {
     if ("replaced" in testCase) {
       expect(dispatch).not.toHaveBeenCalled();
     } else {
-      expect(dispatch.mock.calls[0]?.[2]).toMatchObject({
-        replyExpectation: "public" in testCase ? "required" : "optional",
-      });
+      // A top-level requester may already have answered through a tool; the
+      // classifier, not the runner, still requires the public final.
+      expect(dispatch.mock.calls[0]?.[2]).toMatchObject({ replyExpectation: "optional" });
       const agentParams = dispatch.mock.calls[0]?.[1];
       expect(agentParams).toMatchObject({
         deliver: true,

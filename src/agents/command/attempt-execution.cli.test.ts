@@ -2143,7 +2143,7 @@ describe("CLI attempt execution", () => {
         privateCompletion,
         allowSilence,
         sourceTool = "subagent_settle",
-        replyExpectation,
+        producerOpts,
       ] of INTER_SESSION_REPLY_POLICY_CASES) {
         const sessionEntry = makeSessionEntry(`session-${messageChannel}`);
         const sessionStore = await seedSessionStore(sessionKey, sessionEntry);
@@ -2159,7 +2159,7 @@ describe("CLI attempt execution", () => {
           cfg: { surfaces: { telegram: { silentReply: { group: "allow" } } } },
           opts: {
             privateCompletion: privateCompletion || undefined,
-            replyExpectation,
+            ...producerOpts,
             inputProvenance: { kind: "inter_session", sourceTool },
           },
         });
