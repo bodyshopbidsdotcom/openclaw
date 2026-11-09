@@ -153,6 +153,10 @@ describe("requester settle dispatch deadline", () => {
           directIdempotencyKey: `announce:requester-settle:main:${requesterSessionKey}:${child.runId}:yield-1`,
         }),
       );
+      // A nested requester owes its parent a result; it cannot end with NO_REPLY.
+      expect(deliver).toHaveBeenCalledWith(
+        expect.objectContaining({ triggerMessage: expect.not.stringContaining("NO_REPLY") }),
+      );
       expect(completeBatch).toHaveBeenCalledWith([child], 1, delivered, expect.any(Function));
       expect(append).not.toHaveBeenCalled();
       const onCommitted = completeBatch.mock.calls[0]![3]!;

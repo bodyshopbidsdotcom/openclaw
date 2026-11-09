@@ -445,6 +445,13 @@ async function sendSubagentAnnounceDirectlyBound(
     }
     const inputReplyExpectation =
       params.expectsCompletionMessage || params.requireVisibleReply ? "required" : "optional";
+    // A top-level requester may already have sent its owed synthesis through
+    // sessions_send or the message tool; the runner then accepts NO_REPLY and the
+    // classifier, still "required", accepts only that exact raw silent final.
+    const runnerReplyExpectation =
+      sourceToolId === "subagent_settle" && !params.requesterIsSubagent
+        ? "optional"
+        : inputReplyExpectation;
     const classifyResponse = createDirectAnnounceResponseClassifier({
       replyExpectation: inputReplyExpectation,
       params,
@@ -497,9 +504,9 @@ async function sendSubagentAnnounceDirectlyBound(
               }
               return await runAnnounceAgentCall({
                 agentParams: directAgentParams,
-                // Individual result delivery and an owed public synthesis remain
-                // required; optional settle intake may complete without repeating it.
-                replyExpectation: inputReplyExpectation,
+                // Individual result delivery and a nested requester's synthesis remain
+                // required; settle intake may complete without repeating it.
+                replyExpectation: runnerReplyExpectation,
                 // A resumed parent has no inbound channel dispatcher to keep activity visible.
                 typing:
                   sourceToolId === "subagent_settle" &&

@@ -480,6 +480,7 @@ async function maybeWakeRequesterAfterAllChildrenSettledBound(
     const wakeMessage = buildRequesterSettleWakeMessage({
       findings: preparedFindings.text,
       requireVisibleReply,
+      requesterIsSubagent: requesterDepth >= 1,
       parentOnly,
       yieldedFinalDeliverable: admissionMarker.yieldedFinalDeliverable,
       descendantsUnsettled,
