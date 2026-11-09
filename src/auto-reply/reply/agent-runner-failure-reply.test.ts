@@ -60,6 +60,61 @@ describe("buildEmptyInteractiveReplyPayload", () => {
     expect(getReplyPayloadMetadata(payload ?? {})?.deliverDespiteSourceReplySuppression).toBe(true);
   });
 
+  it("lets a mentioned message-tool group request end silently when silence is allowed", () => {
+    const expectation = resolveSourceReplyExpectation({
+      ctx: {
+        Provider: "slack",
+        Surface: "slack",
+        ChatType: "channel",
+        InboundEventKind: "user_request",
+        WasMentioned: true,
+        MentionSource: "explicit_bot",
+      },
+      cfg: {
+        agents: { defaults: { silentReply: { group: "allow" } } },
+        messages: { groupChat: { visibleReplies: "message_tool" } },
+      },
+    });
+
+    expect(expectation).toBe("optional");
+    expect(
+      buildEmptyInteractiveReplyPayload({
+        completion: resolveReplyCompletion(expectation, "empty"),
+      }),
+    ).toBeUndefined();
+  });
+
+  it.each([
+    {
+      name: "silence is not allowed",
+      ctx: {},
+      cfg: { messages: { groupChat: { visibleReplies: "message_tool" } } },
+    },
+    {
+      name: "the command explicitly asks for a reply",
+      ctx: { CommandSource: "native" },
+      cfg: {
+        agents: { defaults: { silentReply: { group: "allow" } } },
+        messages: { groupChat: { visibleReplies: "message_tool" } },
+      },
+    },
+  ] as const)("keeps a mentioned message-tool group reply required when $name", ({ ctx, cfg }) => {
+    expect(
+      resolveSourceReplyExpectation({
+        ctx: {
+          Provider: "slack",
+          Surface: "slack",
+          ChatType: "channel",
+          InboundEventKind: "user_request",
+          WasMentioned: true,
+          MentionSource: "explicit_bot",
+          ...ctx,
+        },
+        cfg,
+      }),
+    ).toBe("required");
+  });
+
   it("does not add an error for a ready reply", () => {
     const completion = resolveReplyCompletion("required", "ready");
     expect(buildEmptyInteractiveReplyPayload({ completion })).toBeUndefined();
