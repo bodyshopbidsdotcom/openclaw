@@ -249,16 +249,49 @@ export function createSubagentAnnounceSessionStore(
 }
 
 // Required public outputs and optional result intake share both command runtimes.
+// Without a producer expectation, agent-to-agent turns may end silently outside children.
+const OPTIONAL_PRODUCER = { replyExpectation: "optional" } as const;
 export const INTER_SESSION_REPLY_POLICY_CASES = [
   ["agent:main:subagent:reply-required", "discord"],
-  ["agent:main:subagent:optional-settle", "discord", true, true, "subagent_settle", "optional"],
-  ["agent:main:direct:optional-settle", "webchat", true, true, "subagent_settle", "optional"],
-  ["agent:main:direct:required-settle", "webchat", false, false, "subagent_settle", "required"],
-  ["agent:main:direct:peer-result", "webchat", false, true, "sessions_send", "optional"],
-  ["agent:main:direct:reply-required", "webchat"],
+  [
+    "agent:main:subagent:optional-settle",
+    "discord",
+    true,
+    true,
+    "subagent_settle",
+    OPTIONAL_PRODUCER,
+  ],
+  [
+    "agent:main:direct:optional-settle",
+    "webchat",
+    true,
+    true,
+    "subagent_settle",
+    OPTIONAL_PRODUCER,
+  ],
+  [
+    "agent:main:direct:required-settle",
+    "webchat",
+    false,
+    false,
+    "subagent_settle",
+    { replyExpectation: "required" },
+  ],
+  ["agent:main:direct:peer-result", "webchat", false, true, "sessions_send", OPTIONAL_PRODUCER],
+  ["agent:main:direct:settle-optional", "webchat", undefined, true],
   ["agent:main:direct:private-reply-required", "telegram", true],
-  ["agent:main:telegram:direct:reply-required", "telegram"],
+  ["agent:main:telegram:direct:settle-optional", "telegram", undefined, true],
   ["agent:main:telegram:group:optional", "telegram", undefined, true],
-  ["agent:main:telegram:direct:delegated", "telegram", undefined, false, "sessions_send"],
+  ["agent:main:telegram:direct:delegated", "telegram", undefined, true, "sessions_send"],
   ["agent:main:telegram:group:delegated", "telegram", undefined, true, "sessions_send"],
+  ["agent:main:subagent:peer-required", "webchat", undefined, false, "sessions_send"],
+  [
+    "agent:main:direct:lane-required",
+    "webchat",
+    false,
+    false,
+    "sessions_send",
+    { lane: "subagent" },
+  ],
+  ["agent:main:telegram:direct:report-required", "telegram", undefined, false, "subagent_announce"],
 ] as const;

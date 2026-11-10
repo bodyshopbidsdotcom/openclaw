@@ -13,6 +13,7 @@ import {
   getAutomaticDeliveryEvidence,
 } from "../../embedded-agent-runner/delivery-evidence.js";
 import {
+  hasExactSilentFinalReply,
   hasIntentionalSilentAgentPayload,
   hasVisibleAgentPayload,
 } from "../../embedded-agent-runner/message-visibility.js";
@@ -304,6 +305,22 @@ export function createDirectAnnounceResponseClassifier(context: DirectAnnounceRe
                 !hasCompletionSideEffect &&
                 !acceptsIntentionalSilentCompletion))))
       ) {
+        // A yielded settle turn that completed with only the exact silent token
+        // delivered its answer another way (sessions_send, message tool).
+        // Replaying the wake would repeat those effects. An empty reply has no
+        // raw final text, so it still fails here.
+        if (
+          params.sourceTool === "subagent_settle" &&
+          params.requireVisibleReply &&
+          requesterCompletedSuccessfully &&
+          directAnnounceResult &&
+          asOptionalRecord(directAnnounceResult.meta)?.terminalReplyExpectation !== "required" &&
+          directAnnounceResult.meta?.yielded !== true &&
+          directAnnounceResult.meta?.continuationPending !== true &&
+          hasExactSilentFinalReply(directAnnounceResult)
+        ) {
+          return { delivered: true, path: "direct" };
+        }
         return missingVisibleReplyResult();
       }
       const requesterVisibleFinalCommitted =
