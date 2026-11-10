@@ -55,8 +55,7 @@ import { holdMetadataThroughSubagentStop } from "./server.private-completion.met
 import {
   createPrivateCompletionRequest,
   readPrivateCompletionRecorder,
-  registerSessionsSendPrivateCompletionTests,
-} from "./server.private-completion.sessions-send.test-support.js";
+} from "./server.private-completion.request.test-support.js";
 import { registerVisibilityTest } from "./server.private-completion.visibility.test-support.js";
 import { loadSessionEntryAsync } from "./session-entry-load.test-support.js";
 import * as lifecycleState from "./session-lifecycle-state.js";
@@ -140,18 +139,6 @@ describe("private subagent completion processing receipts", () => {
     expect(kernel.gatewayRequestContext.dedupe).not.toBe(previousDedupe);
   }
   const recorder = (input: unknown) => readPrivateCompletionRecorder(input, sessionId);
-
-  registerSessionsSendPrivateCompletionTests(() => ({
-    context: kernel.gatewayRequestContext,
-    sequence,
-    sessionKey,
-    sessionId,
-    completions,
-    pending,
-    transcript,
-    recorder,
-    agentCommandMock,
-  }));
 
   async function processPrivateInput(input: unknown) {
     await recorder(input).persistApproved();

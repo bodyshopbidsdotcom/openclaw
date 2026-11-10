@@ -21,7 +21,6 @@ scenario:
     - docs/channels/qa-channel.md
   codeRefs:
     - src/agents/tools/sessions-send-tool.ts
-    - src/agents/tools/sessions-send-tool.a2a.ts
     - test/e2e/qa-lab/runtime/sessions-send-visible-child.product-proof.e2e.test.ts
   execution:
     kind: vitest

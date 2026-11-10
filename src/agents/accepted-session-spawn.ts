@@ -39,7 +39,7 @@ export function mergeAcceptedSessionSpawnsForRun(
   return receipts ? [...receipts.values()] : [];
 }
 
-/** Retire only the exact receipt resolved by an inline result or confirmed cancellation. */
+/** Retire only the exact receipt resolved by a confirmed cancellation. */
 export function retireAcceptedSessionSpawnCompletionForRun(
   instance: OperationalRunInstanceRef,
   accepted: Pick<AcceptedSessionSpawn, "runId" | "childSessionKey">,

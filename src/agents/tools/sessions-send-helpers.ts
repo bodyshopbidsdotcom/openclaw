@@ -10,7 +10,7 @@ import { sanitizeAgentRunTerminalReplyText } from "../agent-run-terminal-reply.j
 import { readLatestAssistantReply, type AgentWaitResult } from "../run-wait.js";
 import { jsonResult } from "./tool-results.js";
 
-export const SESSIONS_SEND_TRUNCATION_NOTE =
+const SESSIONS_SEND_TRUNCATION_NOTE =
   "The reply may be truncated. Ask the target for the missing section or a file containing the full reply; do not repeat the original task.";
 
 export type SessionDeliveryTarget = {

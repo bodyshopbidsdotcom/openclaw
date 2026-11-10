@@ -53,7 +53,6 @@ import { withGatewayToolCallerIdentity } from "./tools/gateway-caller-context.js
 import { createSessionsChannelTestRegistry } from "./tools/sessions-channel-fixture.test-support.js";
 import { createSessionsHistoryTool } from "./tools/sessions-history-tool.js";
 import { createSessionsListTool } from "./tools/sessions-list-tool.js";
-import * as sessionsSendFollowup from "./tools/sessions-send-followup-custody.js";
 import { createSessionsSendTool } from "./tools/sessions-send-tool.js";
 
 const { callGatewayMock } = await import("./openclaw-tools.sessions.mocks.test-support.js");
@@ -680,7 +679,6 @@ describe("sessions tools", () => {
     getSessionTool: (name, options) =>
       getSessionTool(name, { ...options, config: cloneTestConfig() }),
     callGatewayMock,
-    settleContinuations: () => continuations.settle(),
   });
 
   it.each([
@@ -787,7 +785,6 @@ describe("sessions tools", () => {
       });
     }
     const queue = vi.spyOn(embeddedRuns, "queueGuardedEmbeddedAgentMessageWithOutcomeAsync");
-    const prepare = vi.spyOn(sessionsSendFollowup, "prepareSessionsSendFollowup");
     try {
       if (rejection) {
         queue.mockResolvedValueOnce({
@@ -812,7 +809,8 @@ describe("sessions tools", () => {
         status: "accepted",
         sessionKey: targetKey,
         targetDisposition: steered ? "steered" : "queued",
-        delivery: { status: steered ? "skipped" : "pending" },
+        // The child's answer stays in the child session; nothing reports it back.
+        delivery: { status: "skipped" },
       });
       expect(queue).toHaveBeenCalledOnce();
       expect(queue).toHaveBeenCalledWith(
@@ -835,24 +833,20 @@ describe("sessions tools", () => {
         ([request]) => request.method === "agent",
       );
       expect(agentCalls).toHaveLength(steered ? 0 : 1);
-      expect(prepare).toHaveBeenCalledTimes(steered ? 0 : 1);
       if (agentCalls.length) {
         expect(agentCalls[0]?.[0].params).toMatchObject({ sessionKey: targetKey });
         if (rejection) {
           expect(queue.mock.invocationCallOrder[0]).toBeLessThan(
-            prepare.mock.invocationCallOrder[0]!,
+            callGatewayMock.mock.invocationCallOrder[
+              callGatewayMock.mock.calls.findIndex(([request]) => request.method === "agent")
+            ]!,
           );
         }
-        expect(prepare.mock.invocationCallOrder[0]).toBeLessThan(
-          callGatewayMock.mock.invocationCallOrder[
-            callGatewayMock.mock.calls.findIndex(([request]) => request.method === "agent")
-          ]!,
-        );
       }
+      // No completion claim or reply observer outlives the returned tool call.
+      expect(getActiveGatewayRootWorkCount()).toBe(0);
     } finally {
-      await continuations.settle();
       queue.mockRestore();
-      prepare.mockRestore();
     }
   });
 
@@ -960,8 +954,9 @@ describe("sessions tools", () => {
     expect(params.sessionKey).toBe(durableCronCallerKey);
     expect(params.message).toContain("[Inter-session message]");
     expect(params.message).toContain("[TASK-COMPLETE] re-portal occupancy ready");
-    await continuations.settle();
-    expect(calls.filter((call) => call.method === "agent.wait")).toHaveLength(0);
+    // The Cron parent's answer stays in that session; nothing observes the run.
+    expect(getActiveGatewayRootWorkCount()).toBe(0);
+    expect(calls.some((call) => call.method === "agent.wait")).toBe(false);
     expect(calls.filter((call) => call.method === "chat.history")).toHaveLength(0);
     expect(calls.filter((call) => call.method === "agent")).toHaveLength(1);
     await runOpenClawAgentWriteAdmission(

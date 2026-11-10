@@ -269,46 +269,36 @@ export function registerSubagentRegistrationOwnershipTests({
     },
   );
 
-  it.each([true, undefined] as const)(
-    "preserves historical ownership on replay or replacement (replay=%s)",
-    async (acceptedRunReplay) => {
-      await withOpenClawTestState({ scenario: "minimal" }, async () => {
-        setRuntimeConfigSnapshot({});
-        for (const childSessionKey of ["global", "agent:main:subagent:historical"]) {
-          const params = registration(`historical-${childSessionKey}`, { childSessionKey });
+  it("preserves historical ownership on replacement", async () => {
+    await withOpenClawTestState({ scenario: "minimal" }, async () => {
+      setRuntimeConfigSnapshot({});
+      for (const childSessionKey of ["global", "agent:main:subagent:historical"]) {
+        const params = registration(`historical-${childSessionKey}`, { childSessionKey });
+        await registerSubagentRun(params);
+        await updateRun(params.runId, (draft) => {
+          delete draft.childAgentId;
+        });
+        const historical = loadSubagentRegistryFromSqlite().get(params.runId);
+        subagentRuns.delete(params.runId);
+        vi.mocked(callGateway).mockClear();
+        if (childSessionKey === "global") {
+          let ownership: SubagentRegistrationScope | undefined;
+          await expect(
+            registerSubagentRun(params, {
+              retainOwnership: (scope) => {
+                ownership = scope;
+              },
+            }),
+          ).rejects.toThrow("unresolved or different child owner");
+          expect(loadSubagentRegistryFromSqlite().get(params.runId)).toEqual(historical);
+          expect(callGateway).not.toHaveBeenCalled();
+          expect(ownership?.canAbortAcceptedRun()).toBe(false);
+          expect(ownership?.canCleanupSession()).toBe(false);
+        } else {
           await registerSubagentRun(params);
-          await updateRun(params.runId, (draft) => {
-            delete draft.childAgentId;
-          });
-          const historical = loadSubagentRegistryFromSqlite().get(params.runId);
-          subagentRuns.delete(params.runId);
-          vi.mocked(callGateway).mockClear();
-          if (childSessionKey === "global") {
-            let ownership: SubagentRegistrationScope | undefined;
-            await expect(
-              registerSubagentRun(params, {
-                acceptedRunReplay,
-                retainOwnership: (scope) => {
-                  ownership = scope;
-                },
-              }),
-            ).rejects.toThrow("unresolved or different child owner");
-            expect(loadSubagentRegistryFromSqlite().get(params.runId)).toEqual(historical);
-            expect(callGateway).not.toHaveBeenCalled();
-            expect(ownership?.canAbortAcceptedRun()).toBe(false);
-            expect(ownership?.canCleanupSession()).toBe(false);
-          } else {
-            await registerSubagentRun(params, { acceptedRunReplay });
-            const stored = loadSubagentRegistryFromSqlite().get(params.runId);
-            if (acceptedRunReplay) {
-              expect(stored).toEqual(historical);
-              expect(callGateway).not.toHaveBeenCalled();
-            } else {
-              expect(stored?.childAgentId).toBe("main");
-            }
-          }
+          expect(loadSubagentRegistryFromSqlite().get(params.runId)?.childAgentId).toBe("main");
         }
-      });
-    },
-  );
+      }
+    });
+  });
 }
