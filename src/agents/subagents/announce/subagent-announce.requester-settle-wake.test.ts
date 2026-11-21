@@ -472,7 +472,15 @@ describe("maybeWakeRequesterAfterAllChildrenSettled", () => {
     expect(await wake()).toBe(true);
     expect(deliverSpy).toHaveBeenCalledOnce();
     const call = deliveredCallArg();
-    expectMessage([text], ["NO_REPLY", "stale source reply", "unrelated source reply"]);
+    const message = expectMessage(
+      [
+        text,
+        "If you already delivered that answer another way (for example with sessions_send or the message tool), reply ONLY: NO_REPLY.",
+      ],
+      ["continue any unfinished work", "stale source reply", "unrelated source reply"],
+    );
+    // Only the wake instruction may mention the token; the child's silent terminal stays out.
+    expect(message.split("NO_REPLY")).toHaveLength(2);
     expect(call.requireVisibleReply).toBe(true);
     expect(completeBatchSpy).toHaveBeenCalledExactlyOnceWith(["run-b"], 1, {
       delivered: true,

@@ -218,6 +218,10 @@ export const INTER_SESSION_REPLY_POLICY_CASES = [
   ["optional", "agent:main:direct:private-completion", "telegram", true],
   ["optional", "agent:main:telegram:direct:completion", "telegram"],
   ["optional", "agent:main:telegram:group:completion", "telegram"],
-  ["required", "agent:main:telegram:direct:delegated", "telegram", undefined, "sessions_send"],
+  // A peer may deliver through a tool and end silently; children still owe a result.
+  ["optional", "agent:main:direct:delegated", "webchat", undefined, "sessions_send"],
+  ["optional", "agent:main:telegram:direct:delegated", "telegram", undefined, "sessions_send"],
   ["optional", "agent:main:telegram:group:delegated", "telegram", undefined, "sessions_send"],
+  ["result-required", "agent:main:subagent:delegated", "webchat", undefined, "sessions_send"],
+  ["result-required", "agent:main:direct:private-delegated", "webchat", true, "sessions_send"],
 ] as const;

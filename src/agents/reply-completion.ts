@@ -99,6 +99,15 @@ export function resolveCommandReplyExpectation(params: {
   ) {
     return "result-required";
   }
+  // A peer may answer through a tool (sessions_send, message), then end with NO_REPLY;
+  // its internal channel must not make that silent ending a missing result.
+  if (
+    !inputExpectation &&
+    provenance?.kind === "inter_session" &&
+    provenance.sourceTool === "sessions_send"
+  ) {
+    return "optional";
+  }
   // The wake prompt offers NO_REPLY, so silence stays valid on internal surfaces too.
   if (isExecCompletionInputProvenance(params.opts.inputProvenance)) {
     return "optional";
