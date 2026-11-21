@@ -10,10 +10,6 @@ import { isCronSessionKey } from "../../../sessions/session-key-utils.js";
 import { normalizeDeliveryContext } from "../../../utils/delivery-context.shared.js";
 import { resolveSubagentRequesterAgentId } from "../../subagent-requester-owner.js";
 import {
-  getFollowupForCohort,
-  withFollowupSuccessor,
-} from "../completion/session-followup-completion.js";
-import {
   hasConsumedRequesterInput,
   resolveRequesterDeliveryOutcome,
   resolveConsumedRequesterDeliveryOutcome,
@@ -269,20 +265,13 @@ async function maybeWakeRequesterAfterAllChildrenSettledBound(
   }
   const waitForDescendants = (facts: NonNullable<typeof initialDescendants>) =>
     !pauseNotice && waitForRequesterDescendants(facts, frozen, params.onDescendantsPending);
-  const followup = pauseNotice ? undefined : getFollowupForCohort(settledBatch);
   const getRequesterRun = () =>
-    followup
-      ? undefined
-      : (getLatestLiveSubagentRunByChildSessionKey(
-          requesterSessionKey,
-          (entry) => entry.pauseReason === "sessions_yield",
-          requesterAgentId,
-        ) ??
-        getLatestLiveSubagentRunByChildSessionKey(
-          requesterSessionKey,
-          undefined,
-          requesterAgentId,
-        ));
+    getLatestLiveSubagentRunByChildSessionKey(
+      requesterSessionKey,
+      (entry) => entry.pauseReason === "sessions_yield",
+      requesterAgentId,
+    ) ??
+    getLatestLiveSubagentRunByChildSessionKey(requesterSessionKey, undefined, requesterAgentId);
   const requesterRun = getRequesterRun();
   const isRequesterRunCurrent = captureRequesterRunOwner(requesterRun);
   const isBatchDeliveryClosed = () =>
@@ -427,14 +416,6 @@ async function maybeWakeRequesterAfterAllChildrenSettledBound(
     const isRequesterCurrent = () => {
       if (!sourceReceiptAdmission.isRequesterCurrent()) {
         return false;
-      }
-      if (followup) {
-        try {
-          followup.assertCurrent();
-          return true;
-        } catch {
-          return false;
-        }
       }
       return isRequesterRunCurrent(getRequesterRun(), directIdempotencyKey);
     };
@@ -633,18 +614,7 @@ async function maybeWakeRequesterAfterAllChildrenSettledBound(
           },
         );
       };
-      delivery = await withSubagentProgressDraft(settledBatch, directIdempotencyKey, () =>
-        followup
-          ? withFollowupSuccessor(
-              followup.successor(settledBatch, directIdempotencyKey, () => {
-                if (!isSourceSessionEffectsAllowed()) {
-                  throw new Error("Followup completion cohort changed.");
-                }
-              }),
-              dispatch,
-            )
-          : dispatch(),
-      );
+      delivery = await withSubagentProgressDraft(settledBatch, directIdempotencyKey, dispatch);
     } catch (error) {
       await joinConsumption?.();
       retireUnadoptedInput();

@@ -7,13 +7,8 @@ import {
   reserveSessionControllerSource,
   type SessionControllerInput,
 } from "../../../sessions/session-controller.mailbox.js";
-import {
-  buildAnnounceIdFromChildRun,
-  buildAnnounceIdempotencyKey,
-} from "../../announce-idempotency.js";
 import { subagentCompletionSourceId } from "../registry/subagent-controller-inputs.js";
 import type { SubagentRunRecord } from "../registry/subagent-registry.types.js";
-import { captureRequesterFollowupContinuationCaller } from "../requester-cron-authority.js";
 import { loadRequesterSessionEntry } from "./subagent-announce-delivery.runtime.js";
 
 /** Reserves one followup source against the durable registry row that owns it. */
@@ -62,15 +57,6 @@ export const reserveSubagentCompletionControllerSource = (
     entry,
     subagentCompletionSourceId(entry),
     protocolRunId,
-    captureRequesterFollowupContinuationCaller(
-      entry,
-      protocolRunId ??
-        buildAnnounceIdempotencyKey(
-          buildAnnounceIdFromChildRun({
-            childSessionKey: entry.childSessionKey,
-            childRunId: entry.runId,
-          }),
-        ),
-    ),
+    undefined,
     options,
   );

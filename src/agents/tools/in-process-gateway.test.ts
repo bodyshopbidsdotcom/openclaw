@@ -366,7 +366,6 @@ describe("request-shaped in-process Gateway dispatch", () => {
       const params = { sessionKey: "agent:main:worker", message: "run" };
       const options = {
         agentToolCaller: mainCaller,
-        replyExpectation: "optional" as const,
         expectFinal: true,
         onAccepted: vi.fn(),
         signal: new AbortController().signal,

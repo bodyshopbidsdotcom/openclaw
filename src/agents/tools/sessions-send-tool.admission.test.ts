@@ -28,6 +28,7 @@ import {
   getPluginRuntimeGatewayRequestScope,
   withPluginRuntimeGatewayRequestScope,
 } from "../../plugins/runtime/gateway-request-scope.js";
+import * as gatewayWorkAdmission from "../../process/gateway-work-admission.js";
 import {
   getActiveGatewayRootWorkCount,
   resetGatewayWorkAdmission,
@@ -56,21 +57,11 @@ import {
   setSessionsSendTestActiveRun,
 } from "../openclaw-tools.sessions-steering.test-support.js";
 import "../test-helpers/fast-openclaw-tools-sessions.js";
-import {
-  readFollowupRequest,
-  SessionFollowupCompletion,
-} from "../subagents/completion/session-followup-completion.js";
 import { withGatewayToolCallerIdentity } from "./gateway-caller-context.js";
 import * as inProcessGateway from "./in-process-gateway.js";
 import type { AgentToolGatewayRequestCaller } from "./in-process-gateway.js";
-import * as sessionsSendFollowup from "./sessions-send-followup-custody.js";
-import { runSessionsSendA2AFlow } from "./sessions-send-tool.a2a.js";
 import * as sessionsSendDelivery from "./sessions-send-tool.delivery.js";
 import { createSessionsSendTool } from "./sessions-send-tool.js";
-
-vi.mock("./sessions-send-tool.a2a.js", () => ({
-  runSessionsSendA2AFlow: vi.fn(async () => {}),
-}));
 
 const requesterSessionKey = "agent:main:main";
 const targetSessionKey = "agent:main:dashboard:admission-target";
@@ -215,15 +206,20 @@ async function completeRun(request: GatewayRequest, sessionKey: string, sessionI
   return { status: "ok", terminalReply: { disposition: "visible", text: "Task complete" } };
 }
 
-async function trackActualReplyFlow() {
-  const { runSessionsSendA2AFlow: runActualFlow } = await vi.importActual<
-    typeof import("./sessions-send-tool.a2a.js")
-  >("./sessions-send-tool.a2a.js");
-  const settled = createDeferredCore();
-  vi.mocked(runSessionsSendA2AFlow).mockImplementationOnce((params) =>
-    runActualFlow(params).finally(settled.resolve),
-  );
-  return settled;
+// The tool returns once the self-reply observer is admitted; tests join the observer itself.
+function trackSelfReply() {
+  const observers: Promise<unknown>[] = [];
+  const continueDetached = gatewayWorkAdmission.runWithGatewayDetachedWorkContinuation;
+  const spy = vi
+    .spyOn(gatewayWorkAdmission, "runWithGatewayDetachedWorkContinuation")
+    .mockImplementation((run, origin) => {
+      const observer = continueDetached(run, origin);
+      if (origin === "session:self-reply") {
+        observers.push(observer);
+      }
+      return observer;
+    });
+  return { observers, spy, settle: () => Promise.all(observers) };
 }
 
 describe("sessions_send dispatch admission", () => {
@@ -235,7 +231,6 @@ describe("sessions_send dispatch admission", () => {
     setRuntimeConfigSnapshot(config);
     setActivePluginRegistry(createSessionConversationTestRegistry());
     resetGatewayWorkAdmission();
-    vi.mocked(runSessionsSendA2AFlow).mockReset();
     registerWatch = vi.spyOn(sessionStateEvents, "registerSessionStateWatch");
     for (const [sessionKey, sessionId] of [
       [requesterSessionKey, "requester-session"],
@@ -282,7 +277,6 @@ describe("sessions_send dispatch admission", () => {
     expect(consumed).toHaveLength(1);
     expect(consumed[0]).toContain("accepted notice");
     expect(consumed[0]).not.toContain("unaccepted notice");
-    expect(runSessionsSendA2AFlow).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -404,7 +398,6 @@ describe("sessions_send dispatch admission", () => {
         status: "error",
         error: expect.stringContaining("communication"),
       });
-      expect(runSessionsSendA2AFlow).not.toHaveBeenCalled();
     },
   );
 
@@ -597,104 +590,105 @@ describe("sessions_send dispatch admission", () => {
   });
 
   const callerKeys = [requesterSessionKey, "agent:main:telegram:direct:peer-1"];
-  it.each(callerKeys)("retains accepted reply source (%s)", async (sourceKey) => {
-    if (sourceKey !== requesterSessionKey) {
-      await putSession(sourceKey, { sessionId: "key-only-requester", updatedAt: 1 });
-      await putSession(targetSessionKey, {
-        sessionId: "target-session",
-        updatedAt: 1,
-        spawnedBy: sourceKey,
-      });
-    }
-    const { context, owner, source } = operatorFixture("send");
-    const finish = createDeferredCore();
-    let completion: SessionFollowupCompletion | undefined;
-    const capturing = createDeferredCore();
-    const allowCapture = createDeferredCore();
-    let invocationStarted = false;
-    let returned = false;
-    const capture = operatorCapture.captureGatewayOperatorRunAuthority;
-    const heldCapture = vi
-      .spyOn(operatorCapture, "captureGatewayOperatorRunAuthority")
-      .mockImplementation(async (...args) => {
-        const captured = await capture(...args);
-        if (invocationStarted) {
-          capturing.resolve();
-          await allowCapture.promise;
-        }
-        return captured;
-      });
-    vi.mocked(runSessionsSendA2AFlow).mockImplementationOnce(() => finish.promise);
-    const callGateway = mockAgentGateway(async () => {
-      const followup = readFollowupRequest(runId, targetSessionKey);
-      if (followup) {
-        completion = SessionFollowupCompletion.bind(followup);
-        followup.completion = completion;
-        completion.markAccepted(runId);
-        await completion.settle(runId, {
-          status: "ok",
-          replyText: "Task complete",
-          terminalReply: { disposition: "visible", text: "Task complete" },
-        });
-        completion.finishExecution(runId);
+  it.each(callerKeys)(
+    "retains a self-send reply source before returning (%s)",
+    async (sourceKey) => {
+      if (sourceKey !== requesterSessionKey) {
+        await putSession(sourceKey, { sessionId: "key-only-requester", updatedAt: 1 });
       }
-      return { runId, status: "accepted" };
-    }, true);
-    try {
-      const pending = inOperatorScope(context, owner, source, async () => {
-        const participants = createReplyTurnParticipants({
-          operatorAuthority:
-            getPluginRuntimeGatewayRequestScope()?.client?.internal?.operatorRunAuthority,
+      const { context, owner, source } = operatorFixture("send");
+      const selfReply = trackSelfReply();
+      const capturing = createDeferredCore();
+      const allowCapture = createDeferredCore();
+      const finishRun = createDeferredCore();
+      let invocationStarted = false;
+      let returned = false;
+      const capture = operatorCapture.captureGatewayOperatorRunAuthority;
+      const heldCapture = vi
+        .spyOn(operatorCapture, "captureGatewayOperatorRunAuthority")
+        .mockImplementation(async (...args) => {
+          const captured = await capture(...args);
+          if (invocationStarted) {
+            capturing.resolve();
+            await allowCapture.promise;
+          }
+          return captured;
         });
-        try {
-          return await withGatewayToolCallerIdentity(
-            {
-              agentId: "main",
-              sessionKey: sourceKey,
-              personalToolParticipants: participants,
-              gatewayContextResolver: () => context,
-              receiptAuthority: () => true,
-            },
-            () => {
-              invocationStarted = true;
-              return execute(
-                createTool({ agentSessionKey: sourceKey, callGateway }),
-                "send-followup",
-              );
-            },
-          );
-        } finally {
-          returned = true;
-          participants.close();
+      const callGateway = vi.fn().mockImplementation(async (request: GatewayRequest) => {
+        switch (request.method) {
+          case "sessions.resolve":
+            return { key: sourceKey, agentId: "main" };
+          case "sessions.list":
+            return { sessions: [{ key: sourceKey, agentId: "main", kind: "direct" }] };
+          case "agent":
+            return { runId, status: "accepted" };
+          case "agent.wait":
+            await finishRun.promise;
+            return { status: "ok", terminalReply: { disposition: "empty" } };
         }
+        return unexpectedRequest(request);
       });
-      await assertPendingAtGate(capturing.promise, pending, "Reply-source capture");
-      vi.useFakeTimers();
-      await vi.advanceTimersByTimeAsync(0);
-      vi.useRealTimers();
-      expect(returned).toBe(false);
-      expect(runSessionsSendA2AFlow).not.toHaveBeenCalled();
-      allowCapture.resolve();
-      const result = await pending;
-      expect(result.details).toMatchObject({
-        status: "accepted",
-        delivery: { status: "pending" },
-      });
-      expect(runSessionsSendA2AFlow).toHaveBeenCalledOnce();
-      expect(runSessionsSendA2AFlow).toHaveBeenCalledWith(
-        expect.objectContaining({ requesterSessionKey: sourceKey, targetSessionKey }),
-      );
-      source.release();
-      expect(readGatewayDeviceSourceAuthority(source.isCurrent)?.()).toBe(true);
-    } finally {
-      vi.useRealTimers();
-      allowCapture.resolve();
-      finish.resolve();
-      completion?.close();
-      heldCapture.mockRestore();
-      source.release();
-    }
-  });
+      try {
+        const pending = inOperatorScope(context, owner, source, async () => {
+          const participants = createReplyTurnParticipants({
+            operatorAuthority:
+              getPluginRuntimeGatewayRequestScope()?.client?.internal?.operatorRunAuthority,
+          });
+          try {
+            return await withGatewayToolCallerIdentity(
+              {
+                agentId: "main",
+                sessionKey: sourceKey,
+                personalToolParticipants: participants,
+                gatewayContextResolver: () => context,
+                receiptAuthority: () => true,
+              },
+              () => {
+                invocationStarted = true;
+                return execute(
+                  createTool({ agentSessionKey: sourceKey, callGateway }),
+                  "self-send",
+                  {
+                    sessionKey: sourceKey,
+                  },
+                );
+              },
+            );
+          } finally {
+            returned = true;
+            participants.close();
+          }
+        });
+        await assertPendingAtGate(capturing.promise, pending, "Reply-source capture");
+        vi.useFakeTimers();
+        await vi.advanceTimersByTimeAsync(0);
+        vi.useRealTimers();
+        // The caller turn stays open until the observer owns its source authority.
+        expect(returned).toBe(false);
+        expect(selfReply.observers).toHaveLength(0);
+        allowCapture.resolve();
+        const result = await pending;
+        expect(result.details).toMatchObject({
+          status: "accepted",
+          delivery: { status: "pending" },
+        });
+        expect(selfReply.observers).toHaveLength(1);
+        // The pending observer keeps its own source hold after the caller's hold ends.
+        source.release();
+        expect(readGatewayDeviceSourceAuthority(source.isCurrent)?.()).toBe(true);
+        finishRun.resolve();
+        await selfReply.settle();
+      } finally {
+        vi.useRealTimers();
+        allowCapture.resolve();
+        finishRun.resolve();
+        await selfReply.settle();
+        selfReply.spy.mockRestore();
+        heldCapture.mockRestore();
+        source.release();
+      }
+    },
+  );
 
   it.each([
     { name: "top-level Slack", sourceKey: requesterSessionKey, threadId: undefined },
@@ -724,7 +718,7 @@ describe("sessions_send dispatch admission", () => {
     }
     const laterRoute = { channel: "telegram", accountId: "other", to: "later-recipient" };
     const entry = { sessionId: sourceId, updatedAt: 1, lifecycleRevision: "original-generation" };
-    const settled = await trackActualReplyFlow();
+    const selfReply = trackSelfReply();
     await putSession(sourceKey, {
       ...entry,
       ...(self ? { delivery: normalizeSessionDeliveryState({ context: originalRoute }) } : {}),
@@ -732,7 +726,6 @@ describe("sessions_send dispatch admission", () => {
     if (!self) {
       await putSession(targetKey, { sessionId: targetId, updatedAt: 1, spawnedBy: sourceKey });
     }
-    let completion: Record<string, unknown> | undefined;
     const callGateway = vi.fn().mockImplementation(async (request: GatewayRequest) => {
       switch (request.method) {
         case "sessions.resolve":
@@ -761,8 +754,7 @@ describe("sessions_send dispatch admission", () => {
             });
             return { runId };
           }
-          completion = request.params;
-          return { runId: "completion-run" };
+          break;
         case "send":
           if (self) {
             return { messageId: "final-reply" };
@@ -771,10 +763,6 @@ describe("sessions_send dispatch admission", () => {
       return unexpectedRequest(request);
     });
     const restoreGateway = interceptGateway(callGateway);
-    // Cross-session routing has a transport fixture, not a native custody receipt.
-    const prepareFollowup = self
-      ? undefined
-      : vi.spyOn(sessionsSendFollowup, "prepareSessionsSendFollowup").mockResolvedValue(undefined);
     try {
       const tool = createOpenClawTools({
         agentSessionKey: sourceKey,
@@ -797,18 +785,19 @@ describe("sessions_send dispatch admission", () => {
       const result = await execute(tool!, self ? "self-followup" : "send-routed-task", {
         sessionKey: targetKey,
       });
-      expect(result.details).toMatchObject({ status: "accepted", delivery: { status: "pending" } });
-      await settled.promise;
+      expect(result.details).toMatchObject({
+        status: "accepted",
+        delivery: { status: self ? "pending" : "skipped" },
+      });
+      await selfReply.settle();
       if (!self) {
-        expect(completion).toMatchObject({
-          sessionKey: sourceKey,
-          expectedExistingSessionId: sourceId,
-          expectedExistingSessionLifecycleRevision: entry.lifecycleRevision,
-          ...originalRoute,
-          threadId: slack ? undefined : "42",
-          deliver: false,
-          sourceReplyDeliveryMode: "message_tool_only",
-        });
+        // The peer's answer stays in its session: no wait, wake, or delivery follows.
+        expect(selfReply.observers).toHaveLength(0);
+        expect(requestParams(callGateway, "agent")).toEqual([
+          expect.objectContaining({ sessionKey: targetKey }),
+        ]);
+        expect(requestParams(callGateway, "agent.wait")).toEqual([]);
+        expect(requestParams(callGateway, "send")).toEqual([]);
       } else {
         expect.soft(requestParams(callGateway, "agent")).toEqual([
           expect.objectContaining({
@@ -836,13 +825,13 @@ describe("sessions_send dispatch admission", () => {
         expect(sendParams).not.toHaveProperty("sessionGeneration");
       }
     } finally {
-      prepareFollowup?.mockRestore();
+      selfReply.spy.mockRestore();
       restoreGateway();
     }
   });
 
   it.each(["rejected", "pending"] as const)(
-    "does not install a watch or start A2A when admission is %s",
+    "does not install a watch when admission is %s",
     async (admission) => {
       const callGateway = mockGateway(async (request) => {
         switch (request.method) {
@@ -879,7 +868,6 @@ describe("sessions_send dispatch admission", () => {
         expect.soft(result.details).not.toHaveProperty("sentBeforeError");
       }
       expect.soft(registerWatch).not.toHaveBeenCalled();
-      expect.soft(runSessionsSendA2AFlow).not.toHaveBeenCalled();
       expect.soft(requestParams(callGateway, "agent")).toHaveLength(1);
       expect.soft(requestParams(callGateway, "agent.wait")).toHaveLength(0);
     },

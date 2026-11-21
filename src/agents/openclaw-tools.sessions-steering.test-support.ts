@@ -19,7 +19,6 @@ import { withPreparedEmbeddedRunToolAuthority } from "./harness/tool-authority.r
 import { captureRequesterOrigin } from "./requester-origin.js";
 import type { AnyAgentTool } from "./tools/common.js";
 import { withGatewayToolCallerIdentity } from "./tools/gateway-caller-context.js";
-import * as sessionsSendFollowup from "./tools/sessions-send-followup-custody.js";
 import type { createSessionsSendTool } from "./tools/sessions-send-tool.js";
 
 export function createSessionsSendTestCaller(sessionKey = "agent:re-portal:main") {
@@ -223,16 +222,12 @@ export type SessionsSendSteeringFixtures = {
 };
 
 type SessionsSendActiveSteeringFixtures = SessionsSendSteeringFixtures & {
-  mockAcceptedChildFollowup: () => void;
-  runChildFollowup: <T>(run: () => Promise<T>) => Promise<T>;
   createSessionsSendTool: (
     options: Omit<NonNullable<Parameters<typeof createSessionsSendTool>[0]>, "callGateway">,
   ) => AnyAgentTool;
 };
 
 export function registerSessionsSendActiveSteeringTests({
-  mockAcceptedChildFollowup,
-  runChildFollowup,
   getSessionTool: createSessionTool,
   seedSession,
   callGatewayMock,
@@ -259,24 +254,22 @@ export function registerSessionsSendActiveSteeringTests({
       requesterSessionKey: requesterKey,
     });
     const queue = vi.spyOn(controllerSteer, "steerSessionControllerOperation");
-    const prepare = vi.spyOn(sessionsSendFollowup, "prepareSessionsSendFollowup");
     try {
       queue.mockResolvedValueOnce({ status: "rejected", reason: "injection_unavailable" });
-      mockAcceptedChildFollowup();
-      const result = await runChildFollowup(() =>
-        getSessionTool("sessions_send", {
-          agentSessionKey: requesterKey,
-        }).execute("child-send", {
-          sessionKey: targetKey,
-          message: "deps are ready",
-          timeoutSeconds: 0,
-        }),
-      );
+      mockGatewayResponses({ agent: { runId: "child-send-run", status: "accepted" } });
+      const result = await getSessionTool("sessions_send", {
+        agentSessionKey: requesterKey,
+      }).execute("child-send", {
+        sessionKey: targetKey,
+        message: "deps are ready",
+        timeoutSeconds: 0,
+      });
+      // The child's answer stays in its own session; nothing reports it back.
       expect(result.details).toMatchObject({
         status: "accepted",
         sessionKey: targetKey,
         targetDisposition: "queued",
-        delivery: { status: "pending" },
+        delivery: { status: "skipped" },
       });
       expect(queue.mock.calls[0]?.[0]).toMatchObject({
         operation: { sessionId },
@@ -290,8 +283,7 @@ export function registerSessionsSendActiveSteeringTests({
       const agentCalls = gatewayCalls("agent");
       expect(agentCalls).toHaveLength(1);
       expect(agentCalls[0]?.[0].params).toMatchObject({ sessionKey: targetKey });
-      expect(queue.mock.invocationCallOrder[0]).toBeLessThan(prepare.mock.invocationCallOrder[0]!);
-      expect(prepare.mock.invocationCallOrder[0]).toBeLessThan(
+      expect(queue.mock.invocationCallOrder[0]).toBeLessThan(
         callGatewayMock.mock.invocationCallOrder[
           callGatewayMock.mock.calls.findIndex(([request]) => request.method === "agent")
         ]!,
@@ -299,7 +291,6 @@ export function registerSessionsSendActiveSteeringTests({
     } finally {
       await settleContinuations();
       queue.mockRestore();
-      prepare.mockRestore();
     }
   });
 
@@ -371,8 +362,8 @@ export function registerSessionsSendActiveSteeringTests({
       });
       if (busy) {
         expect(queueMessage).not.toHaveBeenCalled();
-        // A zero-wait admission still has the existing detached reply waiter.
-        expect(gatewayCalls("agent.wait")).toHaveLength(1);
+        // Only a waited send observes the run; a zero-wait admission leaves it alone.
+        expect(gatewayCalls("agent.wait")).toHaveLength(timeoutSeconds === 0 ? 0 : 1);
       }
       await settleContinuations();
       if (busy) {

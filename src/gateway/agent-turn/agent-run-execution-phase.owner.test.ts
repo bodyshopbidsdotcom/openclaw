@@ -2,7 +2,6 @@ import { collectNestedErrorCandidates } from "@openclaw/normalization-core/error
 import { expectDefined } from "@openclaw/normalization-core/expect";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { awaitGateBeforeSettlement, createDeferred } from "../../../test/helpers/promise.js";
-import { createOperationalRunInstanceRef } from "../../agents/admitted-run-context.js";
 import { prepareEmbeddedSessionState } from "../../agents/command/session-preparation.js";
 import {
   getPreparedModelRuntimeBorrowedSnapshot,
@@ -49,9 +48,8 @@ import {
   createExecution,
   bindRegisteredExecution,
   createVisibleExecution,
-  bindFollowupCompletion,
+  bindRegisteredRpcSource,
 } from "./agent-run-execution-phase.owner.test-support.js";
-import { createTestRpcSource } from "./rpc-source.test-support.js";
 import type { AgentTurnPrincipal } from "./types.js";
 
 const { dispatchAgentRunFromGateway, agentCommand } = vi.hoisted(() => ({
@@ -324,8 +322,7 @@ describe("startAgentRunExecution Gateway ownership", () => {
 
   it("selects the exact preparing RPC input and lends its operation to command dispatch", async () => {
     const execution = createExecution();
-    const completion = bindFollowupCompletion(execution);
-    const source = execution.params.prepared.activeRunAbort.entry!;
+    const source = bindRegisteredRpcSource(execution);
     const entered = createDeferred();
     const release = createDeferred();
     dispatchAgentRunFromGateway.mockImplementationOnce(async (dispatch) => {
@@ -345,7 +342,6 @@ describe("startAgentRunExecution Gateway ownership", () => {
     } finally {
       release.resolve();
       await running;
-      completion.close();
     }
     expect(source.input.claim?.released).toBe(true);
   });
@@ -554,21 +550,9 @@ describe("startAgentRunExecution Gateway ownership", () => {
     },
   );
 
-  // Cancelled sources retain their captured identity through disposal. Every
-  // successor is a separately reserved source in the same physical store.
-  it.each([
-    { ending: "aborted", registration: "current" },
-    { ending: "failed", registration: "current" },
-    { ending: "aborted", registration: "foreign" },
-    { ending: "aborted", registration: "absent" },
-    { ending: "aborted", registration: "replacement" },
-    { ending: "aborted", registration: "controller successor" },
-    { ending: "aborted", registration: "session incarnation successor" },
-    { ending: "aborted", registration: "operational instance successor" },
-    { ending: "aborted", registration: "lifecycle successor" },
-  ] as const)(
-    "settles an undispatched $ending followup only after cleanup (registration: $registration)",
-    async ({ ending, registration }) => {
+  it.each(["aborted", "failed"] as const)(
+    "releases an undispatched %s run only after cleanup",
+    async (ending) => {
       const settlement = createGate();
       const execution = createExecution({
         pendingInputSettlement: settlement.wait,
@@ -582,41 +566,7 @@ describe("startAgentRunExecution Gateway ownership", () => {
           : {}),
       });
       execution.params.agentDedupeKeys = [`agent:${execution.params.runId}`];
-      const owner = bindFollowupCompletion(execution);
-      const entry = execution.params.prepared.activeRunAbort.entry!;
-      const identity = getRpcSourceIdentity(entry);
-      const successor =
-        registration !== "current" && registration !== "absent"
-          ? createTestRpcSource(
-              {
-                ...entry.adapter,
-                ...identity,
-                sessionKey:
-                  registration === "foreign" ? "agent:main:unrelated" : identity.sessionKey,
-                sessionId:
-                  registration === "session incarnation successor"
-                    ? "successor-session"
-                    : identity.sessionId,
-                operationalRunInstance:
-                  registration === "replacement" ||
-                  registration === "operational instance successor"
-                    ? createOperationalRunInstanceRef(execution.params.runId)
-                    : entry.adapter.operationalRunInstance,
-                lifecycleGeneration:
-                  registration === "replacement" || registration === "lifecycle successor"
-                    ? "successor-lifecycle"
-                    : entry.adapter.lifecycleGeneration,
-              },
-              execution.params.runId,
-              execution.params.prepared.lifecycleStorePath,
-            )
-          : undefined;
-      if (successor) {
-        rpcSourceTesting.set(execution.params.runId, successor);
-      } else if (registration === "absent") {
-        rpcSourceTesting.deleteExpected(execution.params.runId, entry);
-      }
-      const lostRegistration = successor !== undefined && registration !== "foreign";
+      bindRegisteredRpcSource(execution);
       const recovery = createGate();
       const disposal = createGate();
       execution.params.releaseCronContinuationClaimWithRecovery = async () => {
@@ -624,19 +574,13 @@ describe("startAgentRunExecution Gateway ownership", () => {
         return true;
       };
       execution.runtimeRelease.mockImplementation(disposal.wait);
-      const replyObserved = vi.fn();
-      const reply = owner.take().then((result) => {
-        replyObserved(result);
-        return result;
-      });
-      void reply.catch(() => {});
       const finished = vi.fn();
       const completion = startAgentRunExecution(execution.params).then(finished);
       try {
         await Promise.race([recovery.entered, completion]);
         expectCalls(0, dispatchAgentRunFromGateway, execution.params.io.emitFinal);
         expect(execution.params.context.dedupe.size).toBe(0);
-        expectCalls(0, replyObserved, execution.abortCleanup);
+        expectCalls(0, execution.abortCleanup);
         recovery.resolve();
         await Promise.race([settlement.entered, completion]);
         expectCalls(0, execution.params.io.emitFinal, execution.abortCleanup);
@@ -646,28 +590,15 @@ describe("startAgentRunExecution Gateway ownership", () => {
         expect(execution.params.io.emitFinal).toHaveBeenCalledOnce();
         expect(execution.params.context.dedupe.size).toBe(1);
         expectCalls(1, execution.abortCleanup, execution.gatewayRelease, execution.runtimeRelease);
-        expectCalls(0, execution.callerRelease, replyObserved, finished);
+        expectCalls(0, execution.callerRelease, finished);
         disposal.resolve();
         await completion;
         expectCalls(1, finished, execution.callerRelease);
-        if (successor) {
-          expect(rpcSourceTesting.get(execution.params.runId)).toBe(successor);
-        }
-        if (lostRegistration) {
-          await expect(reply).rejects.toThrow("Follow-up admission was replaced before cleanup.");
-        } else {
-          await expect(reply).resolves.toMatchObject(
-            ending === "aborted"
-              ? { status: "error", stopReason: "rpc" }
-              : { status: "error", error: "Gateway owner retired" },
-          );
-        }
       } finally {
         recovery.resolve();
         settlement.resolve();
         disposal.resolve();
         await completion.catch(() => {});
-        owner.close();
       }
     },
   );

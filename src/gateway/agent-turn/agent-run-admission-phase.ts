@@ -9,7 +9,6 @@ import {
 } from "../../agents/prepared-model-runtime.js";
 import { resolveProviderIdForAuth } from "../../agents/provider-auth-aliases.js";
 import { resolveIngressWorkspaceOverrideForSessionRun } from "../../agents/spawned-context.js";
-import type { FollowupCompletionOwner } from "../../agents/subagents/completion/session-followup-completion.types.js";
 import type {
   SubagentRunRecord,
   SubagentAdmissionRejection,
@@ -248,12 +247,7 @@ export async function prepareAgentRunDispatch(
     return undefined;
   }
   const admittedRunIdentity = activeRunAbort.entry
-    ? {
-        controller: activeRunAbort.controller,
-        operationalRunInstance,
-        lifecycleGeneration: params.lifecycleGeneration,
-        sessionKey: getRpcSourceIdentity(activeRunAbort.entry).sessionKey,
-      }
+    ? { operationalRunInstance, lifecycleGeneration: params.lifecycleGeneration }
     : undefined;
   let admittedRunContext: ReturnType<typeof getAgentRunContext>;
   if (!activeRunAbort.registered) {
@@ -303,15 +297,12 @@ export async function prepareAgentRunDispatch(
       capturedOperator?.release();
     }
   };
-  let followupCompletion: FollowupCompletionOwner | undefined;
   let adoptedParentResume: SubagentRunRecord | undefined;
   let rejectPluginSubagentAdmission: SubagentAdmissionRejection | undefined;
   const cleanupPreaccept = async (admissionReleased = false, failure?: string) => {
     const lease = preparedModelRuntimeLease;
-    const completion = followupCompletion;
     const adopted = adoptedParentResume;
     preparedModelRuntimeLease = undefined;
-    followupCompletion = undefined;
     adoptedParentResume = undefined;
     const rejectPluginSubagent = rejectPluginSubagentAdmission;
     rejectPluginSubagentAdmission = undefined;
@@ -320,15 +311,12 @@ export async function prepareAgentRunDispatch(
     } finally {
       await cleanupRejectedAgentRunAdmission({
         runId: params.runId,
-        context: params.context,
-        incognito: params.sessionEntry?.incognito,
         activeRunAbort,
         activeGatewayWorkAdmission,
         admittedRunIdentity,
         admittedRunContext,
         releaseCallerAuthority,
         lease,
-        completion,
         adopted,
         admissionReleased,
         failure,
@@ -435,7 +423,6 @@ export async function prepareAgentRunDispatch(
         return sessionEntry;
       },
     });
-    followupCompletion = subagentAdmission.followupCompletion;
     const registrationAdmission = revalidateAdmission();
     if (registrationAdmission !== true) {
       return registrationAdmission;
@@ -443,8 +430,7 @@ export async function prepareAgentRunDispatch(
   } catch (err) {
     return rejectPreaccept(resolveAgentRunAdmissionError(ErrorCodes.UNAVAILABLE, err));
   }
-  const { pluginSubagent, reactivateSubagent, adoptParentResume, followupSuccessor } =
-    subagentAdmission;
+  const { pluginSubagent, reactivateSubagent, adoptParentResume } = subagentAdmission;
   rejectPreaccept.stage = "input-preparation";
   let assertInputAdmissionCurrent = params.assertAdmissionCurrent;
   let resumedTaskAdopted = false;
@@ -453,12 +439,6 @@ export async function prepareAgentRunDispatch(
     assertInputAdmissionCurrent?.();
     assertRequesterCurrent?.();
     userTurn?.assertRequesterCurrent?.();
-    followupCompletion?.assertCurrent();
-    if (!resumedTaskAdopted) {
-      followupSuccessor?.assertCurrent();
-    } else if (followupSuccessor && !followupSuccessor.owner.ownsExecution(params.runId)) {
-      throw new Error("Follow-up input no longer owns its admitted execution.");
-    }
     if (parentResume && resumedTaskAdopted && !terminal) {
       assertParentSubagentResumeSuccessorCurrent(parentResume, params.runId);
     }
@@ -612,16 +592,6 @@ export async function prepareAgentRunDispatch(
       userTurn.inputProvenance,
       resolvedRuntime,
     );
-    if (followupCompletion) {
-      assertInputOwnerCurrent();
-      params.assertGatewayWorkAdmissionAllowed();
-      activeRunAbort.controller.signal.throwIfAborted();
-      if (followupSuccessor) {
-        // Final admission transfers this exact cohort synchronously with acceptance.
-        followupCompletion.adopt(followupSuccessor);
-        resumedTaskAdopted = true;
-      }
-    }
     if (adoptParentResume) {
       try {
         // All awaited preparation has succeeded. Transfer task ownership before
@@ -648,7 +618,6 @@ export async function prepareAgentRunDispatch(
       },
       activeRunAbort.controller.signal,
     );
-    followupCompletion?.markAccepted(params.runId);
     params.markAgentRunAccepted(true);
     adoptedParentResume = undefined;
     setGatewayDedupeEntries({
@@ -694,7 +663,6 @@ export async function prepareAgentRunDispatch(
       restoredCronContinuationLifecycleRevision: params.restoredCronContinuation?.lifecycleRevision,
       resolvedThreadId,
       reactivateSubagent,
-      followupCompletion,
       ...preparedModelRuntime,
       replyDispatchRuntime,
       unpersistedOffloadedRefs: userTurn.recorder ? [] : params.offloadedRefs,

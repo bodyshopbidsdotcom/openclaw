@@ -17,8 +17,6 @@ import type { SessionEntry } from "../config/sessions/types.js";
 import { resolveGatewaySessionStoreTargetWithStoreAsync } from "../gateway/session-utils-store-lookup.js";
 import { emitAgentEvent } from "../infra/agent-events.js";
 import { parseAgentSessionKey } from "../routing/session-key.js";
-import { createDeferredCore } from "../shared/deferred.js";
-import * as requesterTransfer from "./subagents/registry/subagent-registry-requester-yield.js";
 
 const { config, callGatewayMock, readAcpSessionMetaForEntryMock } = vi.hoisted(() => ({
   config: {
@@ -66,14 +64,9 @@ import {
 import { createSessionConversationTestRegistry } from "../test-utils/session-conversation-registry.js";
 import { clearTestEmbeddedRun as clearActiveEmbeddedRun } from "./embedded-agent-runner/runs.test-support.js";
 import { createRequesterYieldCallback } from "./openclaw-tools.requester-yield.js";
-import { registerSessionsSendReceiptRetentionTests } from "./openclaw-tools.sessions-send-receipt-retention.test-support.js";
 import {
   deliveredRequesterReply,
-  endChildRun,
-  expectChildCleanupSettled,
-  observeSubagentChange,
   seedDeliveredChild,
-  childDeliverySettled,
   registerSessionsSendRequesterRetirementTests,
   type GatewayCall,
 } from "./openclaw-tools.sessions-send-requester-retirement.test-support.js";
@@ -89,9 +82,7 @@ import {
   addSubagentRunForTests,
   getSubagentRunByRunId,
   resetSubagentRegistryForTests,
-  settleRequesterAfterSessionSpawns,
 } from "./subagents/registry/subagent-registry.test-helpers.js";
-import { holdLiveRequesterTurns } from "./subagents/registry/subagent-requester-turn-liveness.test-support.js";
 import { withGatewayToolCallerIdentity } from "./tools/gateway-caller-context.js";
 import * as sendDelivery from "./tools/sessions-send-tool.delivery.js";
 import { createSessionsSendTool } from "./tools/sessions-send-tool.js";
@@ -102,16 +93,6 @@ let settleRootWork: ReturnType<typeof observeRootWork>;
 async function settleSessionWork() {
   await settleRootWork(true);
   expect(getActiveGatewayRootWorkCount(), getActiveGatewayRootWorkHolders().join(", ")).toBe(0);
-}
-
-async function releaseAndObserve(predicate: () => boolean, release: () => void) {
-  const observed = observeSubagentChange(predicate);
-  try {
-    release();
-    await observed.promise;
-  } finally {
-    observed.stop();
-  }
 }
 
 async function cleanupFollowup() {
@@ -178,25 +159,6 @@ function requesterCalls(requesterSessionKey: string) {
   return calls.filter(
     (call) => call.method === "agent" && call.params?.sessionKey === requesterSessionKey,
   );
-}
-function settlePair(
-  requesterSessionKey: string,
-  requesterTurnRunId: string,
-  childSessionKey: string,
-  runIds: string[],
-  requesterYielded = true,
-) {
-  return settleRequesterAfterSessionSpawns({
-    requesterSessionKey,
-    requesterAgentId: "main",
-    requesterTurnRunId,
-    requesterYielded,
-    acceptedSessionSpawns: runIds.map((runId) => ({
-      runId,
-      childSessionKey,
-      expectsCompletionMessage: requesterYielded,
-    })),
-  });
 }
 async function writePair(
   requesterSessionKey: string,
@@ -393,10 +355,11 @@ it.each(["before admission", "before receipt", "after completion"] as const)(
         );
         return;
       }
+      // The claimed completion keeps its own owner; the send itself reports nothing back.
       expect(sent.details).toMatchObject({
         status: "accepted",
         targetDisposition: "steered",
-        delivery: { status: "pending" },
+        delivery: { status: "skipped" },
       });
       expect(queueB).toHaveBeenCalledOnce();
       expect(queueA).not.toHaveBeenCalled();
@@ -427,7 +390,6 @@ describe("child followups", () => {
   async function setupFollowup(
     wait: (request: GatewayCall) => Promise<unknown>,
     requesterKey = requesterSessionKey,
-    loseAck = false,
   ) {
     await writePair(requesterKey, "requester", childSessionKey, "existing-child");
     await resetSubagentRegistryForTests();
@@ -435,25 +397,14 @@ describe("child followups", () => {
     callGatewayMock.mockImplementation(async (request: GatewayCall) => {
       calls.push(request);
       if (request.method === "agent" && request.params?.sessionKey === childSessionKey) {
-        const receipt = { runId, status: "accepted", targetDisposition: "queued" };
-        if (loseAck) {
-          request.onAccepted?.(receipt);
-          throw new Error("accepted but final response lost");
-        }
-        return receipt;
+        return { runId, status: "accepted", targetDisposition: "queued" };
       }
       if (request.method === "agent.wait" && request.params?.runId === runId) {
         return wait(request);
       }
-      return request.method === "agent" && requesterKey === requesterSessionKey
-        ? deliveredRequesterReply("Requester result")
-        : {};
+      return request.method === "agent" ? deliveredRequesterReply("Requester result") : {};
     });
     announceTesting.setDepsForTest({ callGateway: callGatewayMock });
-  }
-  async function completeFollowup() {
-    await writeFinal(childSessionKey, runId, terminalReply.text);
-    return { runId, status: "ok", startedAt: 1, endedAt: Date.now(), terminalReply };
   }
   function followup(
     timeoutSeconds: number,
@@ -468,324 +419,94 @@ describe("child followups", () => {
       ...options,
     });
   }
+
   it.each([
-    { acknowledgment: "acknowledged", watch: undefined, timeoutSeconds: 0, observation: "timeout" },
-    { acknowledgment: "ACK lost", watch: true, timeoutSeconds: 0, observation: "timeout" },
-    { acknowledgment: "acknowledged", watch: undefined, timeoutSeconds: 1, observation: "timeout" },
-    { acknowledgment: "acknowledged", watch: undefined, timeoutSeconds: 1, observation: "yielded" },
-    { acknowledgment: "acknowledged", watch: undefined, timeoutSeconds: 1, observation: "pending" },
+    { requesterKey: requesterSessionKey, watch: undefined, timeoutSeconds: 0 },
+    { requesterKey: requesterSessionKey, watch: true, timeoutSeconds: 0 },
+    { requesterKey: requesterSessionKey, watch: undefined, timeoutSeconds: 1 },
+    { requesterKey: "agent:main:cron:job:run:isolated-run", watch: undefined, timeoutSeconds: 0 },
   ] as const)(
-    "delivers a queued child follow-up after its original wake was consumed ($acknowledgment, watch=$watch, timeout=$timeoutSeconds, $observation)",
-    async ({ acknowledgment, watch, timeoutSeconds, observation }) => {
-      const childPending = createDeferredCore();
-      let inlineObserved = false;
-      await setupFollowup(
-        async (request) => {
-          if (!inlineObserved && request.params?.timeoutMs === 1000) {
-            inlineObserved = true;
-            return observation === "yielded"
-              ? { status: "ok", yielded: true }
-              : { status: observation };
-          }
-          await childPending.promise;
-          return completeFollowup();
-        },
-        requesterSessionKey,
-        acknowledgment === "ACK lost",
-      );
+    "leaves a child follow-up result in the child session ($requesterKey, watch=$watch, timeout=$timeoutSeconds)",
+    async ({ requesterKey, watch, timeoutSeconds }) => {
+      // The caller's own wait expires before the child finishes.
+      await setupFollowup(async () => ({ status: "timeout" }), requesterKey);
       try {
-        const result = await followup(timeoutSeconds, watch === undefined ? {} : { watch });
+        const result = await followup(
+          timeoutSeconds,
+          watch === undefined ? {} : { watch },
+          requesterKey,
+        );
         expect(result.details).toMatchObject({
           status: "accepted",
           runId,
           targetDisposition: "queued",
           ...(watch ? { watched: true } : {}),
-          delivery: { status: "pending" },
+          delivery: { status: "skipped" },
         });
-        const onYield = vi.fn();
-        const yielded = await yieldTool(
-          "requester",
-          requesterSessionKey,
-          requesterTurnRunId,
-          onYield,
-        ).execute("yield-followup", {});
-        expect(yielded.details).toEqual({ status: "yielded" });
-        expect(onYield).toHaveBeenCalledOnce();
-        expect(
-          await settlePair(requesterSessionKey, requesterTurnRunId, childSessionKey, [runId]),
-        ).toBe(true);
-        expect(requesterCalls(requesterSessionKey)).toHaveLength(0);
-        await releaseAndObserve(() => {
-          const child = getSubagentRunByRunId(runId);
-          return (
-            !child ||
-            child.delivery?.status === "suspended" ||
-            child.delivery?.status === "discarded" ||
-            child.delivery?.disposition === "permanent_failure" ||
-            ((child.delivery?.status === "delivered" || child.cleanupCompletedAt !== undefined) &&
-              !child.requesterSettleWake)
-          );
-        }, childPending.resolve);
-        await settleSessionWork();
-        expect(getSubagentRunByRunId(runId)).toMatchObject({ delivery: { status: "delivered" } });
-        expect(getSubagentRunByRunId(runId)?.requesterSettleWake).toBeUndefined();
-        expect(requesterCalls(requesterSessionKey)).toHaveLength(1);
-        expect(requesterCalls(requesterSessionKey)[0]?.params).toMatchObject({
-          message: expect.stringContaining(terminalReply.text),
-          inputProvenance: { sourceTool: "subagent_settle" },
-        });
+        // The send registers no completion owner, so nothing can wake the caller later.
+        expect(getSubagentRunByRunId(runId)).toBeUndefined();
+        expect(calls.filter((call) => call.method === "agent.wait")).toHaveLength(
+          timeoutSeconds === 0 ? 0 : 1,
+        );
+        await writeFinal(childSessionKey, runId, terminalReply.text);
         emitAgentEvent({
           runId,
           sessionKey: childSessionKey,
           stream: "lifecycle",
-          data: {
-            phase: "end",
-            endedAt: Date.now(),
-            terminalReply,
-          },
+          data: { phase: "end", endedAt: Date.now(), terminalReply },
         });
         await settleSessionWork();
-        expect(requesterCalls(requesterSessionKey)).toHaveLength(1);
+        expect(getSubagentRunByRunId(runId)).toBeUndefined();
+        expect(requesterCalls(requesterKey)).toHaveLength(0);
       } finally {
-        childPending.resolve();
         await cleanupFollowup();
       }
     },
   );
 
   it.each(["ok", "error", "timeout"] as const)(
-    "consumes an inline child follow-up result without a second requester delivery (%s)",
+    "returns an inline child follow-up result without registering it (%s)",
     async (status) => {
-      const result = {
-        runId,
-        status,
-        startedAt: 1,
-        ...(status === "ok" ? { terminalReply } : { error: "Child failed" }),
-      };
-      // The registry's own wait holds no root work while pending; release it only when
-      // the test can observe what it settles, never alongside registry teardown.
-      const registryWait = createDeferredCore();
-      await setupFollowup(async (request) => {
-        if (request.params?.timeoutMs !== 1000) {
-          await registryWait.promise;
-          return { ...result, endedAt: Date.now() };
-        }
+      await setupFollowup(async () => {
         if (status === "ok") {
           await writeFinal(childSessionKey, runId, terminalReply.text);
-          // The real child ends while its requester still holds the inline claim.
-          await endChildRun(runId, childSessionKey, terminalReply);
         }
-        return { ...result, endedAt: Date.now() };
+        return {
+          runId,
+          status,
+          startedAt: 1,
+          endedAt: Date.now(),
+          ...(status === "ok" ? { terminalReply } : { error: "Child failed" }),
+        };
       });
-      const { handle } = createDurableSessionsSendTestRun(requesterTurnRunId);
-      const closeRequester = await setSessionsSendTestActiveRun(
-        "requester",
-        handle,
-        requesterSessionKey,
-        undefined,
-        config,
-      );
-      // The fixture requester has no controller operation; model its live inline claim.
-      const requesterTurn = holdLiveRequesterTurns(requesterTurnRunId);
       try {
         const sent = await followup(1);
         expect(sent.details).toMatchObject({
           status,
           ...(status === "ok"
             ? { reply: terminalReply.text, delivery: { status: "skipped" } }
-            : { error: "Child failed" }),
+            : { error: "Child failed", sentBeforeError: true }),
         });
-        expect(getSubagentRunByRunId(runId)).toMatchObject({
-          expectsCompletionMessage: false,
-          delivery: { status: "delivered" },
-        });
-        await closeRequester();
-        await settlePair(requesterSessionKey, requesterTurnRunId, childSessionKey, [runId], false);
-        if (status !== "ok") {
-          // Only the registry's wait observes these endings, after the inline result was consumed.
-          await releaseAndObserve(
-            () => getSubagentRunByRunId(runId)?.cleanupCompletedAt !== undefined,
-            registryWait.resolve,
-          );
-        }
+        expect(getSubagentRunByRunId(runId)).toBeUndefined();
         await settleSessionWork();
         expect(requesterCalls(requesterSessionKey)).toHaveLength(0);
-        await expectChildCleanupSettled(runId, requesterSessionKey);
       } finally {
-        requesterTurn.restore();
-        await closeRequester();
-        await settleSessionWork();
-        await resetSubagentRegistryForTests();
-        // The ok child ended through its lifecycle; its redundant wait now finds no row.
-        registryWait.resolve();
-        announceTesting.setDepsForTest();
+        await cleanupFollowup();
       }
     },
   );
-
-  it("retains quiet restart custody for a cron requester's fresh child follow-up", async () => {
-    const cronRequesterKey = "agent:main:cron:job:run:isolated-run";
-    const childPending = createDeferredCore();
-    await setupFollowup(async () => {
-      await childPending.promise;
-      return completeFollowup();
-    }, cronRequesterKey);
-    try {
-      const result = await followup(0, {}, cronRequesterKey);
-      expect(result.details).toMatchObject({
-        status: "accepted",
-        delivery: { status: "skipped" },
-      });
-      expect(getSubagentRunByRunId(runId)).toMatchObject({
-        requesterTurnRunId,
-        expectsCompletionMessage: false,
-        execution: { status: "running" },
-      });
-      await releaseAndObserve(() => {
-        const child = getSubagentRunByRunId(runId);
-        return !child || child.cleanupCompletedAt !== undefined;
-      }, childPending.resolve);
-      await settleSessionWork();
-      expect(requesterCalls(cronRequesterKey)).toHaveLength(0);
-    } finally {
-      childPending.resolve();
-      await cleanupFollowup();
-    }
-  });
-});
-
-registerSessionsSendReceiptRetentionTests({
-  config,
-  callGatewayMock,
-  calls,
-  writeEntry,
-  writeFinal,
-  sendTool,
-  yieldTool,
-  requesterCalls,
-  settlePair,
-  settleSessionWork,
-  releaseAndObserve,
-  cleanupFollowup,
-});
-
-it("yields two watched followups when the first settles during yield preparation", async () => {
-  const requesterSessionKey = "agent:main:dashboard:race-parent";
-  const childSessionKey = "agent:main:dashboard:race-child";
-  const requesterTurnRunId = "race-parent-turn";
-  await writePair(requesterSessionKey, "race-parent", childSessionKey, "race-child");
-  await resetSubagentRegistryForTests();
-  const replies = [createDeferredCore(), createDeferredCore()];
-  const runIds = ["race-followup-1", "race-followup-2"];
-  let dispatched = 0;
-  callGatewayMock.mockImplementation(async (request: GatewayCall) => {
-    calls.push(request);
-    if (request.method === "agent" && request.params?.sessionKey === childSessionKey) {
-      return { runId: runIds[dispatched++], status: "accepted", targetDisposition: "queued" };
-    }
-    if (request.method === "agent.wait") {
-      const index = runIds.indexOf(String(request.params?.runId));
-      if (index >= 0) {
-        await replies[index]!.promise;
-        await writeFinal(childSessionKey, runIds[index]!, "FOLLOWUP-" + (index + 1));
-        return {
-          status: "ok",
-          startedAt: 10,
-          endedAt: 20 + index,
-          terminalReply: { disposition: "visible", text: "FOLLOWUP-" + (index + 1) },
-        };
-      }
-    }
-    return deliveredRequesterReply("Both replies reviewed");
-  });
-  announceTesting.setDepsForTest({ callGateway: callGatewayMock });
-  const enteredPreparation = createDeferredCore();
-  const releasePreparation = createDeferredCore();
-  const commit = requesterTransfer.commitRequesterTransfer;
-  const barrier = vi
-    .spyOn(requesterTransfer, "commitRequesterTransfer")
-    .mockImplementation((params, options) => {
-      const prepareYield = params.prepare;
-      return commit(
-        prepareYield
-          ? {
-              ...params,
-              prepare: async () => {
-                await prepareYield();
-                enteredPreparation.resolve();
-                await releasePreparation.promise;
-              },
-            }
-          : params,
-        options,
-      );
-    });
-  try {
-    const tool = sendTool(requesterSessionKey, requesterTurnRunId);
-    for (const runId of runIds) {
-      expect(
-        (
-          await tool.execute(runId, {
-            sessionKey: childSessionKey,
-            mode: "followup",
-            watch: true,
-            timeoutSeconds: 0,
-            message: runId,
-          })
-        ).details,
-      ).toMatchObject({ status: "accepted", runId, watched: true });
-    }
-    const onYield = vi.fn();
-    const yielded = yieldTool(
-      "race-parent",
-      requesterSessionKey,
-      requesterTurnRunId,
-      onYield,
-    ).execute("yield-raced-followups", {});
-    void yielded.catch(() => {});
-    await enteredPreparation.promise;
-    await releaseAndObserve(
-      () => getSubagentRunByRunId(runIds[0]!)?.execution.status === "terminal",
-      replies[0]!.resolve,
-    );
-    releasePreparation.resolve();
-    expect((await yielded).details).toEqual({ status: "yielded" });
-    expect(onYield).toHaveBeenCalledOnce();
-    expect(await settlePair(requesterSessionKey, requesterTurnRunId, childSessionKey, runIds)).toBe(
-      true,
-    );
-    await releaseAndObserve(() => runIds.every(childDeliverySettled), replies[1]!.resolve);
-    await settleSessionWork();
-    const batches = calls.filter(
-      (call) =>
-        call.method === "agent" &&
-        call.params?.sessionKey === requesterSessionKey &&
-        (call.params?.inputProvenance as { sourceTool?: string })?.sourceTool === "subagent_settle",
-    );
-    expect(batches).toHaveLength(1);
-    expect(batches[0]?.params?.message).toEqual(expect.stringContaining("FOLLOWUP-1"));
-    expect(batches[0]?.params?.message).toEqual(expect.stringContaining("FOLLOWUP-2"));
-  } finally {
-    releasePreparation.resolve();
-    replies.forEach((reply) => reply.resolve());
-    barrier.mockRestore();
-    await cleanupFollowup();
-  }
 });
 
 registerSessionsSendRequesterRetirementTests({
   config,
   callGatewayMock,
   calls,
-  writeEntry,
   writeFinal,
   writePair,
   sendTool,
-  yieldTool,
   deliveredReply: deliveredRequesterReply,
   requesterCalls,
   settleSessionWork,
-  drainRootWork: () => settleRootWork(true),
 });
 
 it.each(["requester", "target"])(
@@ -824,7 +545,7 @@ it.each(["requester", "target"])(
     expect(result.details).toMatchObject(
       child
         ? { status: "ok", reply: "Requested result", delivery: { status: "skipped" } }
-        : { status: "accepted", delivery: { status: "pending" } },
+        : { status: "accepted", delivery: { status: "skipped" } },
     );
     if (direction === "target") {
       await runOpenClawAgentWriteAdmission(

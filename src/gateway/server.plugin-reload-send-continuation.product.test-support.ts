@@ -19,7 +19,6 @@ import {
 import * as announceController from "../agents/subagents/announce/subagent-announce-controller-source.js";
 import { SourceOwnerChangedError } from "../agents/subagents/announce/subagent-announce-delivery-retry.js";
 import * as announceRuntime from "../agents/subagents/announce/subagent-announce.runtime.js";
-import { SessionFollowupCompletion } from "../agents/subagents/completion/session-followup-completion.js";
 import {
   getCurrentSubagentRunOwner,
   subagentRuns,
@@ -131,7 +130,6 @@ it.for(["resume", "followup", "failed-reload"] as const)(
       },
     );
     const pauseRetirements: Array<Record<string, unknown>> = [];
-    const completionOwners = vi.spyOn(SessionFollowupCompletion, "bind");
     const state = await createOpenClawTestState(
       kernelGatewayTestStateOptions("plugin-reload-send-continuation"),
     );
@@ -457,7 +455,17 @@ it.for(["resume", "followup", "failed-reload"] as const)(
                 ),
                 `Retained send replay must not fail before target execution: ${JSON.stringify(outcome)}`,
               ).toBe(false);
-              return Promise.all([completed.promise, childAnnouncement.promise]);
+              // A continued child's followup answer stays in its session; only task
+              // completion (resume) announces back to the parent.
+              return Promise.all([
+                completed.promise,
+                mode === "followup"
+                  ? gateway!.client.request("agent.wait", {
+                      runId: result.runId,
+                      timeoutMs: 30_000,
+                    })
+                  : childAnnouncement.promise,
+              ]);
             }),
             failure.promise,
           ]),
@@ -570,15 +578,7 @@ it.for(["resume", "followup", "failed-reload"] as const)(
         });
         expect.soft(target?.pauseReason).toBeUndefined();
       } else {
-        const owners = completionOwners.mock.results.flatMap((binding) =>
-          binding.type === "return" && binding.value.accepted ? [binding.value] : [],
-        );
-        expect(owners).toHaveLength(1);
-        expect(owners[0]?.request).toMatchObject({
-          runId: result.runId,
-          requesterSessionKey: sessionKey,
-          targetSessionKey: child.sessionKey,
-        });
+        // The continued child's answer stays in its session; the send registers no result owner.
         expect(
           await withinTest(
             gateway.client.request("agent.wait", { runId: result.runId, timeoutMs: 30_000 }),

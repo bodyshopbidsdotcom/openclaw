@@ -228,9 +228,11 @@ function startRetirementModel(kind: "active" | "paused" | "delete" | "stop") {
         }
         successor.resolve({ runId: accepted.runId as string });
         await yieldParent.promise;
+        // A followup registers no completion, so the parent has nothing to yield for.
+        return reply("PARENT_SENT_FOLLOWUP");
       }
       // Sibling Stop yields immediately, while the retired child is still settling.
-      return turn === 4 && (followup || active) ? pause() : false;
+      return turn === 4 && active ? pause() : false;
     },
   };
 }
@@ -409,7 +411,7 @@ afterEach(async () => {
 });
 
 it.each(["active", "paused", "delete", "stop"] as const)(
-  "delivers exactly one successor after retiring an %s source",
+  "settles the successor after retiring an %s source",
   async (kind) => {
     const followup = kind === "active" || kind === "paused";
     const script = startRetirementModel(kind);
@@ -437,11 +439,18 @@ it.each(["active", "paused", "delete", "stop"] as const)(
         script.retire();
       }
       await waitForAgent(client, parentRunId);
-      await waitForRun(successor.runId, (row) => row.delivery?.status === "delivered");
-      await script.delivered;
-      expect(script.counts).toEqual({ delivered: 1, retired: 0 });
+      if (followup) {
+        // The followup's answer stays in the child session; sessions_send registers no
+        // completion, so nothing delivers it to the parent.
+        expect(getSubagentRunByRunId(successor.runId)).toBeUndefined();
+        expect(script.counts).toEqual({ delivered: 0, retired: 0 });
+      } else {
+        await waitForRun(successor.runId, (row) => row.delivery?.status === "delivered");
+        await script.delivered;
+        expect(script.counts).toEqual({ delivered: 1, retired: 0 });
+        expect(owedControllerInputs(successor.runId), "the successor delivered once").toEqual([]);
+      }
       expect(owedControllerInputs(source.runId), "the retired source owes nothing").toEqual([]);
-      expect(owedControllerInputs(successor.runId), "the successor delivered once").toEqual([]);
     });
   },
 );

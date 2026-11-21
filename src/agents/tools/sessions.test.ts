@@ -7,10 +7,6 @@ import {
   setRuntimeConfigSnapshot,
 } from "../../config/runtime-snapshot.js";
 import { upsertSessionEntryCore } from "../../config/sessions/session-accessor.js";
-import {
-  getOwnedSessionTranscriptWriterFence,
-  withOwnedSessionTranscriptWrites,
-} from "../../config/sessions/transcript-write-context.js";
 import type { SessionEntry } from "../../config/sessions/types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { GatewayClientRequestError } from "../../gateway/client.js";
@@ -32,8 +28,6 @@ const callGatewayMock = vi.fn();
 const inProcessCreationMock = vi.fn(
   async (..._args: [unknown, unknown, unknown]): Promise<unknown> => ({}),
 );
-type A2AFlow = typeof import("./sessions-send-tool.a2a.js").runSessionsSendA2AFlow;
-const runSessionsSendA2AFlow = vi.hoisted(() => vi.fn<A2AFlow>());
 // Default false mirrors running outside a gateway process; the trusted-creation
 // regression test flips it on and restores it.
 let inProcessGatewayContextAvailable = false;
@@ -58,10 +52,6 @@ vi.mock("./in-process-gateway.js", () => ({
   runWithGatewayToolContinuationContext: async <T>(run: () => Promise<T>): Promise<T> => run(),
 }));
 
-// mock-isolation: Exercise send orchestration without starting A2A agent turns.
-vi.mock("./sessions-send-tool.a2a.js", () => ({
-  runSessionsSendA2AFlow,
-}));
 // mock-isolation: Participant persistence is separate from this mocked Gateway boundary.
 vi.mock("../../sessions/session-participant-recording.js", () => ({
   recordSessionParticipantBestEffort: vi.fn(),
@@ -210,10 +200,7 @@ function resolveReplyTarget(sessionKey: string) {
   });
 }
 
-async function executeFireAndForgetA2AFrom(
-  requesterSessionKey: string,
-  options?: { expectReplyFlow?: boolean },
-) {
+async function executeFireAndForgetSendFrom(requesterSessionKey: string) {
   setActivePluginRegistry(createSessionConversationTestRegistry());
   const targetSessionKey = "agent:other:discord:group:ops";
   setRuntimeConfigSnapshot(createAllSessionsConfig({}, true));
@@ -232,15 +219,25 @@ async function executeFireAndForgetA2AFrom(
     timeoutSeconds: 0,
   });
 
-  expect(requireDetails(result).status).toBe("accepted");
-  if (options?.expectReplyFlow === false) {
-    expect(requireDetails(result)).toMatchObject({ delivery: { status: "skipped" } });
+  // A peer send returns at admission; nothing observes the target run afterward.
+  expect(requireDetails(result)).toMatchObject({
+    status: "accepted",
+    delivery: { status: "skipped" },
+  });
+  expect(callGatewayMock.mock.calls.map(([request]) => request.method)).not.toContain("agent.wait");
+  const agentCall = callGatewayMock.mock.calls.find(([request]) => request.method === "agent");
+  const provenance = (
+    agentCall?.[0] as { params?: { inputProvenance?: { sourceSessionKey?: string } } } | undefined
+  )?.params?.inputProvenance;
+  if (!provenance) {
+    throw new Error("expected target turn provenance");
   }
+  // The target sees this reply address and can send back to it explicitly.
+  return { requesterSessionKey: provenance.sourceSessionKey };
 }
 
 beforeEach(async () => {
   callGatewayMock.mockReset();
-  runSessionsSendA2AFlow.mockReset();
   setRuntimeConfigSnapshot({
     session: { scope: "per-sender", mainKey: "main" },
     tools: { agentToAgent: { enabled: false } },
@@ -466,7 +463,6 @@ describe("sessions_send gating", () => {
         delivery: { status: "skipped" },
         watched: false,
       });
-      expect(runSessionsSendA2AFlow).not.toHaveBeenCalled();
       expect(
         callGatewayMock.mock.calls.filter(([request]) => request.method === "agent.wait"),
       ).toHaveLength(timeoutSeconds);
@@ -623,62 +619,23 @@ describe("sessions_send gating", () => {
       expect(details).toMatchObject({ status: "no_reply", sessionKey: targetSessionKey, message });
       expect(details.reply).toBeUndefined();
       expect(details.delivery).toBeUndefined();
-      expect(runSessionsSendA2AFlow).not.toHaveBeenCalled();
       expect(
         callGatewayMock.mock.calls.some(([request]) => request.method === "chat.history"),
       ).toBe(false);
     },
   );
 
-  it("detaches fire-and-forget A2A work from parent transcript ownership", async () => {
-    let inheritedFence: ReturnType<typeof getOwnedSessionTranscriptWriterFence>;
-    runSessionsSendA2AFlow.mockImplementationOnce(async () => {
-      inheritedFence = getOwnedSessionTranscriptWriterFence();
-    });
-    let parentTranscriptWriteCalls = 0;
-    const parentTranscriptWrite = async <T>(run: () => Promise<T> | T): Promise<T> => {
-      parentTranscriptWriteCalls += 1;
-      return await run();
-    };
-
-    await withOwnedSessionTranscriptWrites(
-      {
-        sessionKey: MAIN_AGENT_SESSION_KEY,
-        sessionTarget: {
-          expectedWriterRunId: "disposed-parent-run",
-          sessionKey: MAIN_AGENT_SESSION_KEY,
-        },
-        withTranscriptWrite: parentTranscriptWrite,
-      },
-      async () => {
-        await executeFireAndForgetA2AFrom(MAIN_AGENT_SESSION_KEY);
-      },
-    );
-    await vi.waitFor(() => expect(runSessionsSendA2AFlow).toHaveBeenCalledOnce());
-
-    expect(inheritedFence).toBeUndefined();
-    expect(parentTranscriptWriteCalls).toBe(0);
-  });
-
-  it("canonicalizes aliased requester keys for same-session A2A delivery", async () => {
-    const tool = createMainSessionsSendTool({ agentSessionKey: "main" });
-    mockTargetRun(MAIN_AGENT_SESSION_KEY, "run-alias-fire-and-forget", {});
-
-    const details = await sendDetails(
-      { sessionKey: MAIN_AGENT_SESSION_KEY, message: "ping", timeoutSeconds: 0 },
-      tool,
-    );
-
-    expect(details).toMatchObject({ status: "accepted", sessionKey: MAIN_AGENT_SESSION_KEY });
-    const flowParams = runSessionsSendA2AFlow.mock.calls[0]?.[0];
-    expect(flowParams?.requesterSessionKey).toBe(MAIN_AGENT_SESSION_KEY);
-    expect(flowParams?.targetSessionKey).toBe(MAIN_AGENT_SESSION_KEY);
-  });
-
-  it("does not start requester delivery for an isolated cron run", async () => {
-    await executeFireAndForgetA2AFrom("agent:main:cron:job:run:abc", { expectReplyFlow: false });
-    expect(runSessionsSendA2AFlow).not.toHaveBeenCalled();
-  });
+  it.each(["agent:main:cron:job:run:abc", "agent:main:telegram:direct:user"])(
+    "addresses the target turn to its requester without observing the reply (%s)",
+    async (requesterSessionKey) => {
+      await upsertSessionEntryCore(
+        { agentId: "main", sessionKey: requesterSessionKey },
+        { sessionId: requesterSessionKey, updatedAt: 1 },
+      );
+      const replyAddress = await executeFireAndForgetSendFrom(requesterSessionKey);
+      expect(replyAddress.requesterSessionKey).toBe(requesterSessionKey);
+    },
+  );
 
   it("caps oversized timeoutSeconds before waiting for the target run", async () => {
     const targetSessionKey = "agent:main:other";

@@ -1,6 +1,5 @@
 import crypto from "node:crypto";
 import { formatErrorMessage } from "@openclaw/normalization-core/error-coercion";
-import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { readAgentSelfHeldRefusal } from "../../gateway/agent-turn/agent-admission-refusal.js";
 import { runWithInProcessGatewaySessionMutation } from "../../gateway/server-plugin-in-process-dispatch.js";
@@ -29,7 +28,6 @@ import {
   buildRunUserTurnIdempotencyKey,
   createUserTurnTranscriptRecorder,
 } from "../../sessions/user-turn-transcript.js";
-import { createDeferredCore } from "../../shared/deferred.js";
 import type { DeliveryContext } from "../../utils/delivery-context.types.js";
 import { INTERNAL_MESSAGE_CHANNEL } from "../../utils/message-channel.js";
 import { listAgentIds } from "../agent-scope.js";
@@ -47,11 +45,9 @@ import {
   hasInProcessGatewayToolContext,
   type AgentToolGatewayRequestCaller,
 } from "./in-process-gateway.js";
-import type { SessionSendReplyAdmission } from "./sessions-send-communication.js";
 import { queueSessionsSendSteeringWithCustody } from "./sessions-send-tool.steering.js";
-import type { AgentStepSession } from "./sessions-send-tool.types.js";
 
-// Bind at dispatch: child followup custody installs its context after tool construction.
+// Bind per dispatch; an accepted send keeps its outcome if the caller retires before the response.
 export const callSessionsSendGateway: AgentToolGatewayRequestCaller = async <T>(
   request: Parameters<AgentToolGatewayRequestCaller>[0],
 ): Promise<T> => await bindAgentToolGatewayRequest({ revalidateOnCompletion: false })<T>(request);
@@ -162,16 +158,11 @@ type SessionsSendDeliveryParams = {
   expectedSessionId?: string;
   /** Communication binds an incarnation without claiming result ownership or forbidding Cron fallback. */
   preparedTargetSessionId?: string;
-  retainAcceptance?: boolean;
-  captureReplyAdmission?: (runId: string) => SessionSendReplyAdmission;
-  assertDispatchCurrent?: () => void;
   // Destination policy fences input commit, not an already accepted acknowledgment.
   assertSendCurrent?: () => void;
   sourceOrigin?: DeliveryContext;
   /** A Cron fallback is another exact recipient and needs its own admission. */
   prepareFallback?: (sessionKey: string) => Promise<{
-    targetSession?: AgentStepSession;
-    captureReplyAdmission?: (runId: string) => SessionSendReplyAdmission;
     callGateway: AgentToolGatewayRequestCaller;
     assertCurrent: () => void;
     close: () => void;
@@ -186,8 +177,6 @@ export type SessionsSendStart =
       targetDisposition: "queued" | "steered";
       steeredRunId?: string;
       a2aSessionKey?: string;
-      a2aSession?: AgentStepSession;
-      replyAdmission?: SessionSendReplyAdmission;
     }
   | {
       ok: false;
@@ -200,7 +189,7 @@ const FALLBACK_STEER_REJECTIONS = new Set<
   Extract<SessionControllerSteerResult, { status: "rejected" }>["reason"]
 >(["no_active_run", "not_running", "stale_run", "injection_unavailable"]);
 
-/** Decide steering before preparing custody for a new turn. */
+/** Decide steering before starting a new turn. */
 export async function trySessionsSendActiveRunDelivery(
   params: SessionsSendDeliveryParams,
   ownChild: boolean,
@@ -394,22 +383,14 @@ export async function trySessionsSendActiveRunDelivery(
   }
 }
 
-function resolveSendMutationGuards(
-  params: Pick<SessionsSendDeliveryParams, "assertDispatchCurrent" | "assertSendCurrent">,
-) {
-  if (params.assertSendCurrent && !hasInProcessGatewayToolContext()) {
-    // Standalone operator clients can fence wire submission, not attach a host-only commit callback.
-    return {
-      assertDispatchCurrent: () => {
-        params.assertDispatchCurrent?.();
-        params.assertSendCurrent?.();
-      },
-    };
+function resolveSendMutationGuards(assertSendCurrent: (() => void) | undefined) {
+  if (!assertSendCurrent) {
+    return {};
   }
-  return {
-    assertDispatchCurrent: params.assertDispatchCurrent,
-    ...(params.assertSendCurrent ? { sessionMutationCommitGuard: params.assertSendCurrent } : {}),
-  };
+  // Standalone operator clients can fence wire submission, not attach a host-only commit callback.
+  return hasInProcessGatewayToolContext()
+    ? { sessionMutationCommitGuard: assertSendCurrent }
+    : { assertDispatchCurrent: assertSendCurrent };
 }
 
 export async function startSessionsSendAgentRun(
@@ -436,12 +417,9 @@ export async function startSessionsSendAgentRun(
           threadId: stringifyRouteThreadId(sourceOrigin.threadId),
         }
       : params.sendParams;
-    const accepted = params.retainAcceptance
-      ? createDeferredCore<{ runId: string; admissionPending?: boolean }>()
-      : undefined;
     const assertSendCurrent = fallback?.assertCurrent ?? params.assertSendCurrent;
     assertSendCurrent?.();
-    const responsePromise = (fallback?.callGateway ?? params.callGateway)<{
+    const response = await (fallback?.callGateway ?? params.callGateway)<{
       runId: string;
       admissionPending?: boolean;
     }>({
@@ -463,27 +441,8 @@ export async function startSessionsSendAgentRun(
           }
         : sendParams,
       timeoutMs: 10_000,
-      ...resolveSendMutationGuards({ ...params, assertSendCurrent }),
-      ...(accepted
-        ? {
-            expectFinal: true,
-            onAccepted: (payload: unknown) => {
-              const receipt = asOptionalRecord(payload);
-              if (
-                receipt?.status === "accepted" &&
-                typeof receipt.runId === "string" &&
-                receipt.admissionPending !== true
-              ) {
-                accepted.resolve({ runId: receipt.runId });
-              }
-            },
-          }
-        : {}),
+      ...resolveSendMutationGuards(assertSendCurrent),
     });
-    // The admission receipt survives a later final-response failure; the registry owns the result.
-    const response = await (accepted
-      ? Promise.race([accepted.promise, responsePromise])
-      : responsePromise);
     const responseRunId =
       typeof response?.runId === "string" && response.runId ? response.runId : params.runId;
     if (response?.admissionPending === true) {
@@ -502,12 +461,7 @@ export async function startSessionsSendAgentRun(
       ok: true,
       runId: responseRunId,
       targetDisposition: "queued",
-      replyAdmission: params.retainAcceptance
-        ? undefined
-        : (fallback?.captureReplyAdmission ?? params.captureReplyAdmission)?.(responseRunId),
-      ...(fallbackSessionKey
-        ? { a2aSessionKey: fallbackSessionKey, a2aSession: fallback?.targetSession }
-        : {}),
+      ...(fallbackSessionKey ? { a2aSessionKey: fallbackSessionKey } : {}),
     };
   } catch (err) {
     const failure = deliveryFailure(params, err);
@@ -610,7 +564,7 @@ export async function createConfiguredAgentMainSession(params: {
       await params.callGateway({
         method: "sessions.create",
         params: createParams,
-        ...resolveSendMutationGuards({ assertSendCurrent: params.assertCurrent }),
+        ...resolveSendMutationGuards(params.assertCurrent),
         timeoutMs: 10_000,
       });
     }

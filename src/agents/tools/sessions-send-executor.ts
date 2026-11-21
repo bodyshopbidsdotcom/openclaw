@@ -26,7 +26,6 @@ import { isCronRunSessionKey, parseAgentSessionKey } from "../../sessions/sessio
 import { formatSystemTurnPrompt } from "../../sessions/system-turn-prompt.js";
 import { normalizeDeliveryContext } from "../../utils/delivery-context.shared.js";
 import { resolveSessionAgentId } from "../agent-scope.js";
-import { bindRequesterYieldCronAuthority } from "../cron-creator-authority-context.js";
 import { RESTART_RECOVERY_INTERRUPTION_NOTE } from "../restart-recovery-prompt.js";
 import { isSubagentSessionFromEntry } from "../subagents/spawn/subagent-depth-policy.js";
 import { ToolInputError } from "../tool-input-error.js";
@@ -46,15 +45,12 @@ import {
   resolveVisibleSessionReference,
 } from "./sessions-helpers.js";
 import { prepareSessionsSendCommunication } from "./sessions-send-communication.js";
-import { dispatchSessionsSendFollowup } from "./sessions-send-followup.js";
+import { finishSessionsSendReply } from "./sessions-send-finish.js";
 import { sendFailure } from "./sessions-send-helpers.js";
-import {
-  finishSessionsSendReply,
-  prepareSessionsSendReplyContext,
-} from "./sessions-send-reply-flow.js";
 import { captureSessionsSendResumeCaller, resumeSessionsSendTask } from "./sessions-send-resume.js";
 import type { createSelfHeldSendRetainer } from "./sessions-send-self-hold.js";
 import { createSessionsSendSessionReaders } from "./sessions-send-session-source.js";
+import { prepareWatchedSteerCompletionClaim } from "./sessions-send-steer-claim.js";
 import {
   buildSessionsSendAgentParams,
   callSessionsSendGateway,
@@ -62,6 +58,8 @@ import {
   isConfiguredAgentMainSessionKey,
   notifySessionsSendSession,
   resolveConfiguredAgentMainSessionKey,
+  startSessionsSendAgentRun,
+  trySessionsSendActiveRunDelivery,
 } from "./sessions-send-tool.delivery.js";
 import {
   readSessionsSendMessage,
@@ -79,7 +77,6 @@ export async function executeSessionsSend(
   retain?: ReturnType<typeof createSelfHeldSendRetainer>,
 ) {
   const requesterOrigin = normalizeDeliveryContext(opts?.requesterOrigin);
-  const withRequesterAuthority = bindRequesterYieldCronAuthority(opts?.requesterTurnRunId);
 
   const params = isRecord(args) ? args : {};
   const promptedAt = Date.now();
@@ -349,7 +346,7 @@ export async function executeSessionsSend(
     }),
   );
   const timeoutMs = finiteSecondsToTimerSafeMilliseconds(timeoutSeconds) ?? 0;
-  const replyTimeoutMs = timeoutSeconds === 0 ? 30_000 : timeoutMs;
+  const deliveryTimeoutMs = timeoutSeconds === 0 ? 30_000 : timeoutMs;
   const runId = opts?.idempotencyKey ?? crypto.randomUUID();
   const sameSession = requesterSessionKey === resolvedKey && targetAgentId === requesterAgentId;
   // Fire-and-forget self-send remains a channel-delivery path. A synchronous
@@ -589,11 +586,10 @@ export async function executeSessionsSend(
           return attempt.result;
         }
         const ownChild = targetSessionEntry?.spawnedBy === requesterSession.canonicalKey;
-        const startParams: Parameters<typeof dispatchSessionsSendFollowup>[0] = {
+        const startParams: Parameters<typeof startSessionsSendAgentRun>[0] = {
           cfg,
           admissionConfig: communication.admissionConfig,
           callGateway: communication.callGateway,
-          captureReplyAdmission: communication.captureReplyAdmission,
           runId,
           mode,
           callDurableGateway: communication.callDurableGateway,
@@ -628,62 +624,59 @@ export async function executeSessionsSend(
             });
           },
         };
-        const replyContext = prepareSessionsSendReplyContext({
-          requesterTarget: requesterSession,
-          requesterSessionId: opts?.agentSessionId,
-          callerOwnsCompletion:
-            opts?.completionOwner === "caller" || access.basis === "scoped-grant",
-          requesterIsSubagent,
-          ownedTask: communication.ownedTask,
-          isIsolatedCronRequester,
-          targetIsSubagent,
+        const watch = params.watch === true;
+        // An exact-session grant cannot outlive its invocation unless its parent lineage is durable.
+        const exactSessionAllowed = !expectedSessionId || persistentChildAccess;
+        const claimSteerCompletion = prepareWatchedSteerCompletionClaim({
+          watch,
+          exactSessionAllowed,
+          nativeChild: !targetAcpMeta,
+          ownChild,
+          childSessionKey: targetSession.canonicalKey,
+          childAgentId: targetSession.agentId,
           requesterSessionKey: requesterSession.canonicalKey,
-          targetSession: targetSessionEntry
-            ? { ...targetSessionEntry, acp: targetAcpMeta }
-            : undefined,
-          context: {
-            callGateway: gatewayCall,
-            targetSessionKey: resolvedKey,
-            targetAgentId,
-            displayKey,
-            replyTimeoutMs,
-            requesterSessionKey,
-            requesterAgentId,
-            requesterOrigin,
-            requesterChannel: opts?.agentChannel,
-          },
+          requesterAgentId,
+          requesterTurnRunId: requesterSessionKey ? opts?.requesterTurnRunId : undefined,
+          displayKey,
         });
-        const { start, completion, registryCompletion, watchField } =
-          await dispatchSessionsSendFollowup(startParams, replyContext, {
-            message,
-            ownChild,
-            persistentChildAccess,
-            nativeChild: !targetAcpMeta,
-            requesterSessionKey: requesterSession.canonicalKey,
-            requesterAgentId,
-            requesterTurnRunId: opts?.requesterTurnRunId,
-            targetSession: targetSessionEntry,
-            withRequesterAuthority,
-            watch: params.watch === true,
-          });
-        if (!start.ok && start.selfHeld && retainedSend && targetSessionEntry && mode !== "steer") {
-          return retainedSend(start.selfHeld, "followup");
+        const active = await trySessionsSendActiveRunDelivery(startParams, ownChild);
+        const start =
+          "ok" in active ? active : await startSessionsSendAgentRun({ ...startParams, ...active });
+        if (!start.ok) {
+          if (start.selfHeld && retainedSend && targetSessionEntry && mode !== "steer") {
+            return retainedSend(start.selfHeld, "followup");
+          }
+          return start.result;
         }
         return await finishSessionsSendReply({
           start,
-          completion,
-          registryCompletion,
-          requesterTurnRunId: opts?.requesterTurnRunId,
-          watchField,
-          replyContext,
-          targetSession,
+          claimSteerCompletion,
+          // Child reports, registered tasks, isolated Cron runs, and host or
+          // scoped-grant callers own their completion; never route it here.
+          selfReply:
+            sameSession &&
+            opts?.completionOwner !== "caller" &&
+            access.basis !== "scoped-grant" &&
+            !requesterIsSubagent &&
+            !communication.ownedTask &&
+            !isIsolatedCronRequester,
+          watch,
+          watchAllowed: exactSessionAllowed,
+          callGateway: gatewayCall,
           cfg,
+          targetSession,
+          targetAgentId,
+          displayKey,
+          requesterTarget: requesterSession,
+          requesterSessionId: opts?.agentSessionId,
+          requesterSessionKey,
           requesterAgentId,
+          requesterChannel: opts?.agentChannel,
+          requesterOrigin,
           promptedAt,
           timeoutSeconds,
           timeoutMs,
-          targetIsSubagent,
-          isIsolatedCronRequester,
+          deliveryTimeoutMs,
         });
       } finally {
         communication.close();

@@ -55,7 +55,10 @@ it("distinguishes sessions_send local context selection from exact external addr
 
   expect(description).toContain("on this Gateway");
   expect(description).toContain("not an external address");
-  expect(description).toContain("When a new turn starts, its reply reaches you once");
+  expect(description).toContain("Replies are never reported back");
+  expect(description).toContain(
+    "nothing wakes you later, so ask the target to sessions_send you its result",
+  );
   expect(description).toContain("Continue with another sessions_send");
   expect(description).toContain("post to channels with message");
   expect(description).toContain('`targetDisposition: "queued"` or `"steered"`');

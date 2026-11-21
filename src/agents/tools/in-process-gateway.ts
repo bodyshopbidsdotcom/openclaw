@@ -24,7 +24,6 @@ import type {
   TrustedAgentToolCaller,
 } from "../../gateway/server-methods/types.js";
 import {
-  captureOperatorToolGatewayContinuationContext,
   dispatchGatewayMethodInProcess,
   getInProcessGatewayRequestContext,
   runWithOperatorToolGatewayCleanupContext,
@@ -41,7 +40,6 @@ import {
   withPluginRuntimeGatewayContextResolver,
 } from "../../plugins/runtime/gateway-request-scope.js";
 import { readQuestionDispatchCapability } from "../harness/host-private-capabilities.js";
-import type { ReplyExpectation } from "../reply-completion.js";
 import { requesterCreatorProfileId } from "../requester-origin.js";
 import {
   captureGatewayToolCallerAssertion,
@@ -81,8 +79,6 @@ type AgentToolGatewayRequest = Pick<
   | "scopes"
   | "timeoutMs"
 > & {
-  /** In-process result intake can finish without owing another answer. */
-  replyExpectation?: ReplyExpectation;
   agentRunTracking?: GatewayAgentRunTaskOwner;
   agentToolCaller?: TrustedAgentToolCaller;
   /** Host-authored provenance; never serialized into Gateway RPC parameters. */
@@ -134,24 +130,8 @@ export function runWithGatewayToolCleanupContext<T>(
 }
 
 /** Transfers accepted reply work to a bounded source-authority hold, not the tool lifetime. */
-export async function runWithGatewayToolContinuationContext<T>(
-  run: () => Promise<T>,
-  options?: { retainRequester?: true },
-): Promise<T> {
+export function runWithGatewayToolContinuationContext<T>(run: () => Promise<T>): Promise<T> {
   const resolveGatewayContext = callerGatewayContextResolver();
-  if (options?.retainRequester) {
-    const preparation = captureOperatorToolGatewayContinuationContext(undefined, {
-      retainRequester: true,
-    });
-    if (preparation) {
-      const captured = await preparation;
-      try {
-        return await captured.runWithRequester(run);
-      } finally {
-        captured.release();
-      }
-    }
-  }
   return runWithOperatorToolGatewayContinuationContext(() =>
     withoutGatewayToolCallerIdentity(() =>
       resolveGatewayContext
@@ -310,7 +290,6 @@ async function callAgentToolGatewayRequestBound<T>(
       agentToolCaller: _agentToolCaller,
       sessionCreation: _sessionCreation,
       sessionMutationCommitGuard: _sessionMutationCommitGuard,
-      replyExpectation: _replyExpectation,
       ...wireRequest
     } = request;
     return await runBoundInProcessGatewayCall(
@@ -358,7 +337,6 @@ async function callAgentToolGatewayRequestBound<T>(
   }
   const dispatchOptions = {
     prepareDispatchCurrent: request.prepareDispatchCurrent,
-    ...(request.replyExpectation ? { replyExpectation: request.replyExpectation } : {}),
     forceSyntheticClient: true,
     operatorRoleActor: { kind: "system" as const },
     ...(isHostPluginApprovalMethod(method) && runtimeIdentity?.approvalOwnerPluginId

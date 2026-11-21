@@ -464,7 +464,7 @@ describeLive("retained native child continuation", () => {
                   watch: true,
                 }) +
                 ".",
-              "If accepted, call sessions_yield and wait for the child result. When it arrives finish with exactly PARENT_WATCHED. On rejection finish with PARENT_REJECTED. Do not call other tools or start other work.",
+              "If accepted, finish with exactly PARENT_WATCHED. On rejection finish with PARENT_REJECTED. Do not call other tools or start other work.",
             ].join("\n"),
           );
           const allowedQuestion = await questionFor(watchedReply, watchedAttempt.runId);
@@ -473,23 +473,41 @@ describeLive("retained native child continuation", () => {
             answers: { answers: { communication: ["Allow once"] } },
           });
           await until(
-            "nonblocking retained-child completion reaches its parent",
+            "parent finishes after the nonblocking watched send",
             async () =>
               finalReplies((await history(parent)).slice(beforeWatch), "PARENT_WATCHED")[0],
           );
-          const watchMessages = (await history(parent)).slice(beforeWatch);
-          const watchedSend = watchMessages.find(
-            (message) => message.role === "toolResult" && message.toolName === "sessions_send",
-          );
-          expect(watchedSend?.details).toMatchObject({ status: "accepted", watched: true });
+          const watchedSend = (await history(parent))
+            .slice(beforeWatch)
+            .find(
+              (message) => message.role === "toolResult" && message.toolName === "sessions_send",
+            );
+          expect(watchedSend?.details).toMatchObject({
+            status: "accepted",
+            watched: true,
+            delivery: { status: "skipped" },
+          });
           expect(watchCursor()).toBeDefined();
-          expect(finalReplies(await history(child), watchedReply)).toEqual([watchedReply]);
+          await until(
+            "retained child records its reply",
+            async () => finalReplies(await history(child), watchedReply)[0],
+          );
+          // The child's answer stays in its session; sessions_send reports nothing back.
+          expect(
+            (await history(parent))
+              .slice(beforeWatch)
+              .filter(
+                (message) =>
+                  message.role === "user" &&
+                  asOptionalRecord(message.provenance)?.sourceSessionKey === child,
+              ),
+          ).toEqual([]);
           const watchedTarget = await gateway.request<{ session: { sessionId: string } }>(
             "sessions.describe",
             { key: child },
           );
           expect(watchedTarget.session.sessionId).toBe(childId);
-          record("retained-child-watched-completion", {
+          record("retained-child-watched-send", {
             child,
             childId,
             details: watchedSend?.details,

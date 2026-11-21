@@ -14,10 +14,8 @@ export function matchesRequesterCronAuthorityAdmission(
     authority: {
       requesterSessionKey: string;
       requesterSessionId: string;
-    } & (
-      | { kind: "yield"; batch: readonly { childSessionKey: string }[] }
-      | { kind: "followup"; sourceSessionKey: string }
-    );
+      batch: readonly { childSessionKey: string }[];
+    };
   },
   params: RequesterAdmissionTarget,
 ): boolean {
@@ -27,12 +25,9 @@ export function matchesRequesterCronAuthorityAdmission(
     authority.requesterSessionKey === params.sessionKey &&
     authority.requesterSessionId === params.sessionId &&
     params.inputProvenance?.kind === "inter_session" &&
-    (authority.kind === "yield"
-      ? params.inputProvenance.sourceTool === "subagent_settle" &&
-        authority.batch.some(
-          (entry) => entry.childSessionKey === params.inputProvenance?.sourceSessionKey,
-        )
-      : params.inputProvenance.sourceTool === "subagent_announce" &&
-        params.inputProvenance.sourceSessionKey === authority.sourceSessionKey)
+    params.inputProvenance.sourceTool === "subagent_settle" &&
+    authority.batch.some(
+      (entry) => entry.childSessionKey === params.inputProvenance?.sourceSessionKey,
+    )
   );
 }

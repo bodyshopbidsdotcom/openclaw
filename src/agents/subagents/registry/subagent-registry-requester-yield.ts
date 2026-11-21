@@ -5,7 +5,6 @@ import { captureOpenClawStateWorkerContext } from "../../../state/openclaw-state
 import type { OpenClawStateWorkerContext } from "../../../state/openclaw-state-worker-context.types.js";
 import type { AcceptedSessionSpawn } from "../../accepted-session-spawn.js";
 import type { OperationalRunInstanceRef } from "../../operational-run-instance.js";
-import { promoteFollowupYield } from "../completion/session-followup-completion.js";
 import {
   promoteRequesterCronAuthority,
   type PreparedRequesterCronAuthority,
@@ -652,7 +651,6 @@ export async function settleRequesterTurnAfterSessionSpawns(params: {
     finish: (members) => {
       const entries = children(members);
       trackSubagentProgressYield(requesterTurnRunId, entries);
-      promoteFollowupYield({ requesterTurnRunId, entries, rearmGeneration });
       promoteGoalContinuationYield({ requesterTurnRunId, entries, rearmGeneration });
       promoteRequesterCronAuthority({ requesterTurnRunId, batch: entries, rearmGeneration });
       if (rearmGeneration !== undefined && params.requesterAgentId) {

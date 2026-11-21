@@ -3,7 +3,6 @@ import {
   hasGatewayClientCap,
 } from "../../../packages/gateway-protocol/src/client-info.js";
 import { getAdmittedRunDelegatedAuthority } from "../../agents/admitted-run-context.js";
-import type { AgentRunTerminalOutcome } from "../../agents/agent-run-terminal-outcome.js";
 import { withPreparedModelRuntimePluginGenerationScope } from "../../agents/prepared-model-runtime-generation-scope.js";
 import { resolveScheduledToolPolicyContext } from "../../agents/scheduled-tool-policy.js";
 import { resolveIngressWorkspaceOverrideForSessionRun } from "../../agents/spawned-context.js";
@@ -49,10 +48,7 @@ import { withAgentRunDispatchExecutionIdentity } from "./agent-run-dispatch-exec
 import { prepareAgentRunExecutionIdentityFacts } from "./agent-run-execution-lineage.js";
 import type { StartAgentRunExecutionParams } from "./agent-run-execution-types.js";
 import { dispatchAgentRunWithMedia } from "./agent-run-media.js";
-import {
-  resolveGatewayPluginSubagentToolPolicy,
-  settleUnstartedGatewayFollowup,
-} from "./agent-run-subagent.js";
+import { resolveGatewayPluginSubagentToolPolicy } from "./agent-run-subagent.js";
 import { createAgentRunUndispatchedOutcome } from "./agent-run-undispatched-outcome.js";
 import {
   annotateAgentRunUserTurnPrompt,
@@ -129,26 +125,6 @@ async function executeAgentRun(
     const { entry: abortEntry, controller: abortController } = prepared.activeRunAbort;
     const operationalRunInstance = prepared.operationalRunInstance;
     const sessionKey = abortEntry && getRpcSourceIdentity(abortEntry).sessionKey;
-    const admittedRunIdentity = abortEntry
-      ? {
-          controller: abortController,
-          operationalRunInstance,
-          lifecycleGeneration: params.lifecycleGeneration,
-          sessionKey: getRpcSourceIdentity(abortEntry).sessionKey,
-        }
-      : undefined;
-    const assertSettlementCurrent = () => {
-      params.assertGatewayLifetimeCurrent?.();
-      assertAgentRunLifecycleGenerationCurrent(params.lifecycleGeneration);
-      // Cancellation closes execution, but its retained producer still records the outcome.
-      if (
-        !leaseActive ||
-        (prepared.activeRunAbort.registered &&
-          prepared.activeGatewayWorkAdmission?.isActive() === false)
-      ) {
-        throw new Error("Agent settlement no longer owns this Gateway run");
-      }
-    };
     const assertDispatchCurrent = () => {
       params.assertGatewayLifetimeCurrent?.();
       params.executionSource?.();
@@ -220,24 +196,11 @@ async function executeAgentRun(
       );
     const execute = async () => {
       await yieldAfterAgentAcceptedAck();
-      const settleUnstartedFollowup = (outcome: AgentRunTerminalOutcome) =>
-        !dispatched
-          ? settleUnstartedGatewayFollowup({
-              completion: prepared.followupCompletion,
-              runId: params.runId,
-              admittedRunEntry: abortEntry,
-              admittedRunIdentity,
-              context: params.context,
-              isIncognito: diagnostics.incognito,
-              outcome,
-            })
-          : undefined;
       const { finishFailure, finishUndispatchedAbort, publishAfterCleanup } =
         createAgentRunUndispatchedOutcome({
           execution: params,
           diagnostics,
           captureJobSession,
-          settleUnstartedFollowup,
           deferFinal,
         });
       try {
@@ -396,7 +359,6 @@ async function executeAgentRun(
           withAgentRunDispatchExecutionIdentity(
             {
               assertCurrent: assertDispatchCurrent,
-              assertSettlementCurrent,
               admittedRunEntry: abortEntry,
               commandRuntimeContext: {
                 config: replyDispatchRuntime.config,
@@ -570,7 +532,6 @@ async function executeAgentRun(
               io: { ...params.io, emitFinal: deferFinal },
               context: params.context,
               isIncognito: diagnostics.incognito,
-              followupCompletion: prepared.followupCompletion,
               canonicalSkillWorkspaceDir: params.sessionEntry?.worktree?.canonicalWorkspaceDir,
             },
             executionIdentitySpawnFacts,
@@ -610,14 +571,8 @@ async function executeAgentRun(
     deliverFinal?.();
   } finally {
     // Shutdown joins the execution through asynchronous runtime disposal, not just bookkeeping.
-    try {
-      prepared.releaseCallerAuthority?.();
-      releaseGatewayRootContinuation?.();
-    } finally {
-      if (!dispatched) {
-        prepared.followupCompletion?.finishExecution(params.runId);
-      }
-    }
+    prepared.releaseCallerAuthority?.();
+    releaseGatewayRootContinuation?.();
     // A refused final response does not undo completed execution and disposal.
     if (executionSettled && runtimeDisposed) {
       acknowledgeCleanup();

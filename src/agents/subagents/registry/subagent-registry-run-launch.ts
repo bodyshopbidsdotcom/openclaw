@@ -252,7 +252,7 @@ export class SubagentLaunchManager extends SubagentRecoveryManager {
           .filter(isGenerationCandidate)
           .map((row) => row.runId),
       ]);
-      const result = await mutateSubagentRuns(
+      await mutateSubagentRuns(
         [...runIds],
         (rows) => {
           assertCurrent();
@@ -261,25 +261,6 @@ export class SubagentLaunchManager extends SubagentRecoveryManager {
             throw new SubagentRegistryMutationRejectedError(
               "Subagent registration cannot replace an unresolved or different child owner.",
             );
-          }
-          if (previous && options.acceptedRunReplay === true) {
-            if (
-              previous.childSessionKey !== childSessionKey ||
-              previous.requesterSessionKey !== requesterSessionKey ||
-              previous.requesterAgentId !== requesterAgentId ||
-              previous.requesterTurnRunId !==
-                (registerParams.requesterTurnRunId?.trim() || undefined) ||
-              previous.expectsCompletionMessage !== registerParams.expectsCompletionMessage ||
-              Boolean(previous.collect) !== Boolean(registerParams.collect)
-            ) {
-              throw new SubagentRegistryMutationRejectedError(
-                "Accepted run already has another completion owner; inspect it before retrying.",
-              );
-            }
-            subagentRuns.runWithCompletionAuthority(previous, () => options.assertCurrent?.(), {
-              requireRetainedAuthority: true,
-            });
-            return { value: undefined };
           }
           if (selected ? !isSameSubagentRunOwner(previous, selected) : previous !== undefined) {
             throw new SubagentRegistryMutationRejectedError(
@@ -356,11 +337,7 @@ export class SubagentLaunchManager extends SubagentRecoveryManager {
                 ),
               });
               if (authority && !registerParams.collect) {
-                subagentRuns.bindCompletionAuthority(
-                  entry,
-                  authority,
-                  options.requesterRunInstance,
-                );
+                subagentRuns.bindCompletionAuthority(entry, authority);
                 custodyTransferred = true;
               }
             } finally {
@@ -385,9 +362,6 @@ export class SubagentLaunchManager extends SubagentRecoveryManager {
           },
         },
       );
-      if (!result) {
-        return;
-      }
       const published = currentEntry();
       if (!published) {
         throw new SubagentRegistryMutationRejectedError(

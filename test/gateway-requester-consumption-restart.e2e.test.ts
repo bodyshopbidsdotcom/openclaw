@@ -6,10 +6,7 @@ import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { expect, it, vi } from "vitest";
 import { readTranscriptExportSnapshotReadOnlySync } from "../src/config/sessions/session-accessor.sqlite-export-read.js";
 import type { GatewayClient } from "../src/gateway/client.js";
-import {
-  findSubagentRecords,
-  findSubagentSpawnReceipt,
-} from "../src/gateway/server.subagent-stop-settlement.product.test-support.js";
+import { findSubagentSpawnReceipt } from "../src/gateway/server.subagent-stop-settlement.product.test-support.js";
 import { buildMockOpenAiResponsesProvider } from "../src/gateway/test-openai-responses-model.js";
 import { openNodeSqliteDatabase } from "../src/infra/node-sqlite.js";
 import { reserveTestPortListener } from "../src/test-utils/port-claims.js";
@@ -33,11 +30,8 @@ it.skipIf(process.platform === "win32")(
   { timeout: 180_000 },
   async ({ signal, onTestFailed, onTestFinished }) => {
     const rootKey = "agent:main:dashboard:restart-hub";
-    let childKey: string | undefined;
-    let siblingKey: string | undefined;
     let childRunId: string | undefined;
     let capturedRunId: string | undefined;
-    let initialized: { runId: string; childSessionKey: string }[] = [];
     let finishChild: (() => void) | undefined;
     let finishCaptured: (() => void) | undefined;
     let completionRequests = 0;
@@ -79,70 +73,32 @@ it.skipIf(process.platform === "win32")(
           } else if (text.includes("EXPLICIT_FOLLOWUP_AFTER_RESTART")) {
             reply("EXPLICIT_FOLLOWUP_OK");
           } else if (text.includes("CUSTODY_ROOT_TASK")) {
-            const receipts = input.flatMap((item) =>
-              isRecord(item) && item.type === "function_call_output"
-                ? findSubagentRecords(
-                    item.output,
-                    (value) =>
-                      value.status === "accepted" &&
-                      typeof value.runId === "string" &&
-                      typeof value.sessionKey === "string",
-                  )
-                : [],
-            );
-            const child = receipts.find((value) => value.sessionKey === childKey);
-            const sibling = receipts.find((value) => value.sessionKey === siblingKey);
-            if (typeof child?.runId === "string") {
-              childRunId ??= child.runId;
-            }
-            if (typeof sibling?.runId === "string") {
-              capturedRunId ??= sibling.runId;
-            }
-            if (text.includes("CAPTURED_CUSTODY_RESULT")) {
-              // Hold the real request after its input receipt has been persisted, then crash.
-              completionRequests++;
-            } else if (!childRunId) {
-              call("sessions_send", {
-                sessionKey: childKey,
-                message: "CUSTODY_CHILD_TASK",
-                timeoutSeconds: 0,
-              });
-            } else if (!capturedRunId) {
-              call("sessions_send", {
-                sessionKey: siblingKey,
-                message: "CUSTODY_SIBLING_TASK",
-                timeoutSeconds: 0,
-              });
-            } else {
-              call("sessions_yield", {});
-            }
-          } else if (text.includes("CUSTODY_SETUP_TASK")) {
-            initialized = input.flatMap((item) => {
+            // Completion obligations come from their spawn owner; sessions_send registers none.
+            const spawned = input.flatMap((item) => {
               const receipt =
                 isRecord(item) && item.type === "function_call_output"
                   ? findSubagentSpawnReceipt(item.output)
                   : undefined;
               return receipt ? [receipt] : [];
             });
-            childKey = initialized[0]?.childSessionKey;
-            siblingKey = initialized[1]?.childSessionKey;
-            if (initialized.length < 2) {
-              call("sessions_spawn", {
-                task: "INITIALIZE_CUSTODY_SESSION",
-                context: "isolated",
-                visible: true,
-                expectsCompletionMessage: false,
-              });
+            childRunId ??= spawned[0]?.runId;
+            capturedRunId ??= spawned[1]?.runId;
+            if (text.includes("CAPTURED_CUSTODY_RESULT")) {
+              // Hold the real request after its input receipt has been persisted, then crash.
+              completionRequests++;
+            } else if (!childRunId) {
+              call("sessions_spawn", { task: "CUSTODY_CHILD_TASK", context: "isolated" });
+            } else if (!capturedRunId) {
+              call("sessions_spawn", { task: "CUSTODY_SIBLING_TASK", context: "isolated" });
             } else {
-              reply("CUSTODY_SETUP_COMPLETE");
+              call("sessions_yield", {});
             }
           } else if (text.includes("CUSTODY_CHILD_TASK")) {
             finishChild = () => reply("NESTED_CHILD_RECONCILED");
           } else if (text.includes("CUSTODY_SIBLING_TASK")) {
             finishCaptured = () => reply("CAPTURED_CUSTODY_RESULT");
           } else {
-            assert(text.includes("INITIALIZE_CUSTODY_SESSION"), "Unexpected synthetic request");
-            reply("SESSION_READY");
+            assert.fail("Unexpected synthetic request");
           }
         }),
     });
@@ -160,7 +116,7 @@ it.skipIf(process.platform === "win32")(
         ...base,
         // This fixture owns one agent; unrelated empty stores are not recovery inputs.
         agents: { ...base.agents, entries: { main: {} } },
-        tools: { ...base.tools, allow: ["sessions_send", "sessions_spawn", "sessions_yield"] },
+        tools: { ...base.tools, allow: ["sessions_spawn", "sessions_yield"] },
       },
       env: {
         ...restartEnv,
@@ -221,21 +177,6 @@ it.skipIf(process.platform === "win32")(
         await instance.startGateway();
         client = await connectRestartClient(instance, {}, signal);
         await client.request("sessions.create", { key: rootKey, agentId: "main" });
-        const setup = await client.request<{ runId: string }>("chat.send", {
-          sessionKey: rootKey,
-          message: "CUSTODY_SETUP_TASK",
-          idempotencyKey: randomUUID(),
-          deliver: false,
-        });
-        expect(
-          await client.request("agent.wait", { runId: setup.runId, timeoutMs: 15_000 }),
-        ).toMatchObject({ status: "ok" });
-        expect(initialized).toHaveLength(2);
-        for (const child of initialized) {
-          expect(
-            await client.request("agent.wait", { runId: child.runId, timeoutMs: 15_000 }),
-          ).toMatchObject({ status: "ok" });
-        }
         const root = await client.request<{ runId: string }>("chat.send", {
           sessionKey: rootKey,
           message: "CUSTODY_ROOT_TASK",

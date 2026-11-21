@@ -15,9 +15,9 @@ import {
 const enabled = isLiveTestEnabled() && isTruthyEnvValue(process.env.OPENCLAW_LIVE_SUBAGENT_STRESS);
 const describeLive = enabled ? describe : describe.skip;
 
-describeLive("OpenAI requested child completion", () => {
+describeLive("OpenAI requested child result", () => {
   it(
-    "delivers a requested late child result once with a visible parent answer",
+    "leaves a late child result in the child session without waking the parent",
     async () => {
       await runWithLiveSubagentGateway(
         { additionalTools: ["sessions_send"] },
@@ -47,7 +47,7 @@ describeLive("OpenAI requested child completion", () => {
               "This is a new request using the existing child, not a request to create another task.",
               `Call sessions_send exactly once with ${JSON.stringify({ sessionKey: child.childSessionKey, message: gateTask(gate.url), timeoutSeconds: 0 })}.`,
               `After the send is accepted, finish this turn with exactly ${waitingMarker}. Do not call sessions_yield, spawn, read, exec, or poll the child yourself.`,
-              `When the actual late child result arrives, your required user-facing final is ${parentMarker} on the first line and the exact child result on the second line. Do not send a message or acknowledgement back to the child.`,
+              `If a late child result ever arrives, your required user-facing final is ${parentMarker} on the first line and the exact child result on the second line. Do not send a message or acknowledgement back to the child.`,
             ].join("\n"),
           );
           await until("late child request reaches the closed external gate", () =>
@@ -74,7 +74,7 @@ describeLive("OpenAI requested child completion", () => {
           expect(sends[0]?.details).toMatchObject({
             status: "accepted",
             targetDisposition: "queued",
-            delivery: { status: "pending" },
+            delivery: { status: "skipped" },
           });
           expect(gate.snapshot()).toEqual({ requests: 1, waiting: 1, released: false });
           record("late-child-held", {
@@ -83,50 +83,26 @@ describeLive("OpenAI requested child completion", () => {
             gate: gate.snapshot(),
           });
           gate.release(lateResult);
-          const expected = `${parentMarker}\n${lateResult}`;
-          const rawFinal = await until(
-            "parent consumes the requested late result",
-            async () => finalReplies(await history(parentKey), parentMarker)[0],
+          // The late result stays in the child session; sessions_send never reports it back.
+          await until(
+            "child records the late result",
+            async () => finalReplies(await history(child.childSessionKey), lateResult)[0],
           );
-          const rawMessages = await history(parentKey);
-          const projected = await gateway.request<{ messages: unknown[] }>("chat.history", {
-            sessionKey: parentKey,
-            limit: 80,
-          });
-          const visibleMessages = projected.messages.flatMap((value) => {
-            const message = asOptionalRecord(value);
-            return message ? [message] : [];
-          });
-          record("late-child-parent-answer", {
+          const after = await history(parentKey);
+          record("late-child-stays-in-child", {
             parentKey,
             childKey: child.childSessionKey,
-            rawFinal,
-            visibleFinals: finalReplies(visibleMessages, parentMarker),
+            parentMessagesAfterSend: after.length - before.length,
           });
-          expect(rawFinal).toBe(expected);
+          expect(finalReplies(after, parentMarker)).toEqual([]);
           expect(
-            finalReplies(visibleMessages, parentMarker),
-            "the requested answer reaches the human-facing chat",
-          ).toEqual([expected]);
-          const completions = rawMessages.slice(before.length).filter((message) => {
-            const provenance = asOptionalRecord(message.provenance);
-            return (
-              message.role === "user" &&
-              provenance?.sourceSessionKey === child.childSessionKey &&
-              provenance.sourceTool === "subagent_announce"
-            );
-          });
-          expect(
-            completions,
-            "the requested late result is delivered once as a completion",
-          ).toHaveLength(1);
-          expect(JSON.stringify(completions[0]?.content)).toContain(lateResult);
-          expect(
-            visibleMessages.filter(
-              (message) =>
-                message.role === "user" && JSON.stringify(message.content).includes(lateResult),
-            ),
-            "raw completion input remains internal",
+            after.slice(before.length).filter((message) => {
+              const provenance = asOptionalRecord(message.provenance);
+              return (
+                message.role === "user" && provenance?.sourceSessionKey === child.childSessionKey
+              );
+            }),
+            "the parent receives no completion or wake from the child",
           ).toEqual([]);
           expect(
             finalReplies(await history(child.childSessionKey), ""),

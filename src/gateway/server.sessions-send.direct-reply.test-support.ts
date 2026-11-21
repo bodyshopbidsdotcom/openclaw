@@ -1,8 +1,12 @@
 import path from "node:path";
 import { expect, vi } from "vitest";
-import { bindAgentToolGatewayRequest } from "../agents/tools/in-process-gateway.js";
-import { runSessionsSendA2AFlow } from "../agents/tools/sessions-send-tool.a2a.js";
+import {
+  bindAgentToolGatewayRequest,
+  type AgentToolGatewayRequestCaller,
+} from "../agents/tools/in-process-gateway.js";
+import { startSessionsSendSelfReply } from "../agents/tools/sessions-send-self-reply.js";
 import { loadSessionEntry } from "../config/sessions/session-accessor.js";
+import * as gatewayWork from "../process/gateway-work-admission.js";
 import { createOutboundTestPlugin, createTestRegistry } from "../test-utils/channel-plugins.js";
 import type { GatewayContextResolver } from "./server-methods/types.js";
 import { setTestPluginRegistry, testState, writeSessionStore } from "./test-helpers.js";
@@ -44,26 +48,44 @@ export async function runDirectSessionReplyScenario(params: {
   const session = { agentId: "main", sessionKey, storePath, sessionId };
   const entry = loadSessionEntry(session);
 
-  await runSessionsSendA2AFlow({
-    callGateway: bindAgentToolGatewayRequest(params),
-    runId: "direct-reply-proof",
-    targetAgentId: "main",
-    targetSessionKey: sessionKey,
-    displayKey: sessionKey,
-    requesterAgentId: "main",
-    requesterSessionKey: sessionKey,
-    requesterChannel: "feishu",
-    requesterDeliveryGeneration: {
-      ...session,
-      lifecycleRevision: entry?.lifecycleRevision ?? null,
-    },
-    replyTimeoutMs: 5_000,
-    reply: {
-      status: "ok",
-      replyText: "same-session reply delivered",
-      terminalReply: { disposition: "visible", text: "same-session reply delivered" },
-    },
-  });
+  const gateway = bindAgentToolGatewayRequest(params);
+  // The self-send run is not executed here: its settled reply comes from the wait,
+  // and the source delivery goes through the real Gateway send path.
+  const callGateway = (async (request) =>
+    request.method === "agent.wait"
+      ? {
+          status: "ok",
+          terminalReply: { disposition: "visible", text: "same-session reply delivered" },
+        }
+      : await gateway(request)) as AgentToolGatewayRequestCaller;
+  // The tool returns at observer admission; join the detached observer itself.
+  const observers: Promise<unknown>[] = [];
+  const continueDetached = gatewayWork.runWithGatewayDetachedWorkContinuation;
+  const observe = vi
+    .spyOn(gatewayWork, "runWithGatewayDetachedWorkContinuation")
+    .mockImplementation((run, origin) => {
+      const observer = continueDetached(run, origin);
+      observers.push(observer);
+      return observer;
+    });
+  try {
+    await startSessionsSendSelfReply({
+      callGateway,
+      runId: "direct-reply-proof",
+      agentId: "main",
+      sessionKey,
+      displayKey: sessionKey,
+      requesterChannel: "feishu",
+      requesterDeliveryGeneration: {
+        ...session,
+        lifecycleRevision: entry?.lifecycleRevision ?? null,
+      },
+      waitTimeoutMs: 5_000,
+    });
+    await Promise.all(observers);
+  } finally {
+    observe.mockRestore();
+  }
 
   expect(sendText).toHaveBeenCalledExactlyOnceWith(
     expect.objectContaining({

@@ -279,7 +279,6 @@ const repositoryScriptEntries = [
   "scripts/perf/jiti-stack-format.ts!",
   "scripts/perf/pr-restore-memory.mjs!",
   "scripts/perf/session-cold-restore-memory.ts!",
-  "scripts/perf/subagent-custody-abort-retention.ts!",
   "scripts/perf/worker-lifecycle-message-measure.ts!",
   // Retained source commands and selectable preloads execute directly by exact path.
   "scripts/perf/after-turn-context-measure.ts!",

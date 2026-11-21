@@ -9,7 +9,6 @@ import {
 } from "../../../plugins/runtime/gateway-request-scope.js";
 import { createDeferredCore } from "../../../shared/deferred.js";
 import type { OperationalRunInstanceRef } from "../../operational-run-instance.js";
-import { transferFollowupCohort } from "../completion/session-followup-cohort.js";
 import {
   matchesSubagentChildSessionOwner,
   resolveSubagentChildAgentId,
@@ -446,7 +445,6 @@ class SubagentRunMap extends Map<string, SubagentRunRecord> {
 
   /** Committed replacement transfers custody without reviving a retired source. */
   transferCompletionAuthority(previous: SubagentRunRecord, next: SubagentRunRecord): void {
-    transferFollowupCohort(previous, next);
     const previousKey = getSubagentRunRuntimeKey(previous);
     const nextKey = getSubagentRunRuntimeKey(next);
     if (this.retiredCompletionEntries.has(previousKey)) {

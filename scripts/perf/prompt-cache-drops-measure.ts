@@ -1,10 +1,10 @@
 // Multi-turn synthetic prompt replay; no Gateway or external provider is contacted.
 // node --import ./scripts/tsx.mjs scripts/perf/prompt-cache-drops-measure.ts --turns 100
-// Uses the real returned-result producer, command preparation, embedded prompt
-// assembly and Anthropic request serializer. A database close/reopen clears volatile prompt
+// Uses synthetic host-marked returned-result guidance with the real command preparation,
+// embedded prompt assembly and Anthropic request serializer. A database close/reopen clears volatile prompt
 // state and reloads the durable transcript (not a full Gateway restart). Forty synthetic plugin tool definitions
 // change once deliberately; channel, child and cron session cohorts share a mix
-// of ordinary, sessions_send success/failure, and subagent_settle turns.
+// of ordinary, returned child success/failure, and subagent_settle turns.
 // Reports prefix invalidations per 100 turns, NOT measured provider cache hits.
 // The mock's 8000 -> 2000 cache counters exercise the production drop diagnostics
 // on each invalidation; they are not a token-savings or billing estimate.
@@ -32,7 +32,6 @@ import { clearEmbeddedSessionPromptStates } from "../../src/agents/embedded-agen
 import { relocateCurrentRuntimeContextCarrierToTail } from "../../src/agents/internal-runtime-context.js";
 import { convertToLlm } from "../../src/agents/sessions/messages.js";
 import { SessionManager } from "../../src/agents/sessions/session-manager.js";
-import { runSessionsSendA2AFlow } from "../../src/agents/tools/sessions-send-tool.a2a.js";
 import { setRuntimeConfigSnapshot } from "../../src/config/runtime-snapshot.js";
 import { upsertSessionEntryCore } from "../../src/config/sessions/session-accessor.js";
 import {
@@ -126,28 +125,10 @@ try {
         const sourceTool = phase === 4 ? "subagent_settle" : "subagent_announce";
         let extraSystemPrompt: string | undefined;
         if (phase === 1 || phase === 3) {
-          await runSessionsSendA2AFlow({
-            targetSessionKey: "agent:main:subagent:returned",
-            targetAgentId: "main",
-            requesterSessionKey: sessionKey,
-            displayKey: "synthetic child",
-            runId: `child-${turn}`,
-            replyTimeoutMs: 1000,
-            replyMode: "one-way",
-            notifyRequesterOnWaitFailure: true,
-            reply:
-              phase === 1
-                ? {
-                    status: "ok",
-                    replyText: "Synthetic child result.",
-                    terminalReply: { disposition: "visible", text: "Synthetic child result." },
-                  }
-                : { status: "error", error: "Synthetic failed operation." },
-            deliverRequesterReply: async (reply) => {
-              extraSystemPrompt = reply.extraSystemPrompt;
-            },
-          });
-          assert.ok(extraSystemPrompt, "returned-result producer reached requester");
+          extraSystemPrompt =
+            phase === 1
+              ? "A child session returned a synthetic result. Report the outcome; this result is delivered once."
+              : "A child session failed a synthetic operation. Report the failure; do not retry it.";
         }
         const runId = `${sessionId}-${turn}`;
         const opts: AgentCommandOpts = {

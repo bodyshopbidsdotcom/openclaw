@@ -31,7 +31,6 @@ import {
   resetSystemEventsForTest,
 } from "../infra/system-events.js";
 import { createSessionVisibilityChecker } from "../plugin-sdk/session-visibility.js";
-import { withPluginRuntimeGatewayRequestScope } from "../plugins/runtime/gateway-request-scope.js";
 import {
   getActiveGatewayRootWorkCount,
   resetGatewayWorkAdmission,
@@ -56,8 +55,6 @@ import {
 } from "./openclaw-tools.sessions-timeout.test-support.js";
 import {
   getSessionTool,
-  createSessionsSendGatewayScope,
-  mockAcceptedChildFollowup,
   installMessagingTestRegistry,
   TEST_CONFIG,
   type GatewayCall,
@@ -621,13 +618,9 @@ describe("sessions tools", () => {
     getSessionTool: (name, options) =>
       getSessionTool(name, { ...options, config: cloneTestConfig() }),
     callGatewayMock,
-    settleContinuations: () => continuations.settle(),
   });
 
   registerSessionsSendActiveSteeringTests({
-    mockAcceptedChildFollowup,
-    runChildFollowup: (run) =>
-      withPluginRuntimeGatewayRequestScope(createSessionsSendGatewayScope(), run),
     getSessionTool,
     seedSession,
     callGatewayMock,

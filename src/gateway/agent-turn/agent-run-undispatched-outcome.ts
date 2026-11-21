@@ -1,8 +1,5 @@
 import { ErrorCodes } from "../../../packages/gateway-protocol/src/index.js";
-import {
-  buildAgentRunTerminalOutcome,
-  type AgentRunTerminalOutcome,
-} from "../../agents/agent-run-terminal-outcome.js";
+import { buildAgentRunTerminalOutcome } from "../../agents/agent-run-terminal-outcome.js";
 import { readWithdrawnUserTurnInputId } from "../../sessions/user-turn-transcript-admission.js";
 import { completeUserTurnProcessing } from "../../sessions/user-turn-transcript-processing.js";
 import { errorShapeFromError } from "../error-shape.js";
@@ -17,13 +14,11 @@ export function createAgentRunUndispatchedOutcome({
   execution,
   diagnostics,
   captureJobSession,
-  settleUnstartedFollowup,
   deferFinal,
 }: {
   execution: StartAgentRunExecutionParams;
   diagnostics: ReturnType<typeof createAgentRunDiagnostics>;
   captureJobSession: () => ReturnType<typeof captureAgentJobSession>;
-  settleUnstartedFollowup: (outcome: AgentRunTerminalOutcome) => Promise<void> | undefined;
   deferFinal: StartAgentRunExecutionParams["io"]["emitFinal"];
 }) {
   const { prepared } = execution;
@@ -39,7 +34,6 @@ export function createAgentRunUndispatchedOutcome({
         diagnostics.warning("input completion persistence failed")(completionError);
       }
     }
-    await settleUnstartedFollowup(outcome);
     const payload = { runId: execution.runId, status: "error" as const, summary: renderedErr };
     publishAfterCleanup = () => {
       setGatewayDedupeEntries({
@@ -70,7 +64,6 @@ export function createAgentRunUndispatchedOutcome({
       await finishFailure(error, false);
       return;
     }
-    await settleUnstartedFollowup(outcome);
     publishAfterCleanup = () => {
       const payload = projectWithdrawnAgentInput(
         buildAbortedAgentPayload(execution.runId, stopReason, {

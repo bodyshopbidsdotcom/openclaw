@@ -218,7 +218,6 @@ describe("registered completion source custody", () => {
             registerSubagentRun(
               registration(runId, { gatewayContextResolver: resolveGatewayContext }),
               {
-                acceptedRunReplay: true,
                 assertCurrent: () => {
                   if (!current) {
                     throw new Error("requester retired before registry commit");
@@ -283,16 +282,9 @@ describe("registered completion source custody", () => {
               method: "agent.wait",
               params: { runId },
             });
-            const accepted = subagentRuns.get(runId);
-            expect(accepted?.childAgentId).toBe("main");
-            await registerSubagentRun(registration(runId, { childAgentId: "MAIN" }), {
-              acceptedRunReplay: true,
-            });
-            expect(subagentRuns.get(runId)).toBe(accepted);
+            expect(subagentRuns.get(runId)?.childAgentId).toBe("main");
             await expect(
-              registerSubagentRun(registration(runId, { childAgentId: "research" }), {
-                acceptedRunReplay: true,
-              }),
+              registerSubagentRun(registration("mismatched-child", { childAgentId: "research" })),
             ).rejects.toThrow("explicit valid child agent");
             expect(callGateway).toHaveBeenCalledTimes(1);
           }

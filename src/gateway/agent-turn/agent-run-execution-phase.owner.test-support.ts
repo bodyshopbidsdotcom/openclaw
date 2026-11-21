@@ -1,7 +1,6 @@
 import { onTestFinished, vi } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
 import { createOperationalRunInstanceRef } from "../../agents/admitted-run-context.js";
-import { SessionFollowupCompletion } from "../../agents/subagents/completion/session-followup-completion.js";
 import { getAgentEventLifecycleGeneration } from "../../infra/agent-events.js";
 import {
   beginSessionEffect,
@@ -173,13 +172,14 @@ export function createVisibleExecution() {
   return execution;
 }
 
-export function bindFollowupCompletion(execution: ReturnType<typeof createExecution>) {
+/** Registers the admitted run as the current RPC source for its own session. */
+export function bindRegisteredRpcSource(execution: ReturnType<typeof createExecution>) {
   const { params } = execution;
-  const sessionKey = "agent:main:followup-owner";
+  const sessionKey = "agent:main:registered-owner";
   const lifecycleGeneration = getAgentEventLifecycleGeneration();
   const entry = createTestRpcSource(
     {
-      sessionId: "followup-session",
+      sessionId: "registered-session",
       sessionKey,
       operationalRunInstance: params.prepared.operationalRunInstance,
       lifecycleGeneration,
@@ -210,22 +210,5 @@ export function bindFollowupCompletion(execution: ReturnType<typeof createExecut
       rpcSourceTesting.delete(params.runId);
     }
   });
-  const custody = new AbortController();
-  const owner = SessionFollowupCompletion.bind({
-    runId: params.runId,
-    requesterSessionKey: "agent:main:requester",
-    requesterSessionId: "requester-session",
-    requesterAgentId: "main",
-    targetAgentId: "main",
-    targetSessionKey: sessionKey,
-    custody: {
-      signal: custody.signal,
-      assertCurrent: () => custody.signal.throwIfAborted(),
-      run: (work) => work(),
-      release: () => custody.abort(),
-    },
-  });
-  owner.markAccepted(params.runId);
-  params.prepared.followupCompletion = owner;
-  return owner;
+  return entry;
 }

@@ -8,7 +8,6 @@ import type {
   PreparedReplyDispatchRuntime,
 } from "../../agents/prepared-model-runtime.js";
 import type { TrustedSubagentCompletionHandoff } from "../../agents/subagents/announce/subagent-announce-handoff.js";
-import type { FollowupCompletionOwner } from "../../agents/subagents/completion/session-followup-completion.types.js";
 import type { SessionEntry } from "../../config/sessions/types.js";
 import type { SessionEffectRef } from "../../sessions/session-controller.lifecycle.js";
 import type { registerChatAbortController } from "../chat-abort.js";
@@ -51,7 +50,6 @@ export type PreparedAgentRunDispatch = PreparedAgentRunModelRuntime & {
   lifecycleStorePath?: string;
   resolvedThreadId?: string | number;
   reactivateSubagent: boolean;
-  followupCompletion?: FollowupCompletionOwner;
   replyDispatchRuntime: PreparedReplyDispatchRuntime;
   unpersistedOffloadedRefs: OffloadedRef[];
   userTurn: PreparedAgentRunUserTurn;
